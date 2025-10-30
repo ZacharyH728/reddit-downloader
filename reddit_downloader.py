@@ -4,6 +4,7 @@ import requests
 from dotenv import load_dotenv
 import re
 import time # <-- Added time module
+from image_to_video import create_video_clips_from_images
 
 # --- Environment Variables ---
 CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
@@ -13,6 +14,24 @@ USERNAME = os.getenv("REDDIT_USERNAME")
 PASSWORD = os.getenv("REDDIT_PASSWORD")
 DOWNLOAD_LOCATION = os.getenv("DOWNLOAD_LOCATION", "./downloads")
 
+"""Sends a POST request to the Stash instance to scan for new media."""
+def scanStash():
+    url = "https://stash.zhill.me/graphql"
+    headers = {
+        "ApiKey": "TEST",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "query": "{ metadataScan }"
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
+        print("Status Code:", response.status_code)
+        print("Response Body:", response.json())
+    except requests.exceptions.RequestException as e:
+        print(f"An error occurred: {e}")
 
 def download_file(url, filename):
     """Downloads a file from a URL to a specified path."""
@@ -102,6 +121,8 @@ if __name__ == "__main__":
         print("Starting new download cycle...")
         try:
             main()
+            create_video_clips_from_images("/output")
+            scanStash()
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
             print("Will retry after the delay.")
