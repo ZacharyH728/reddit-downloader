@@ -4,7 +4,6 @@ import requests
 from dotenv import load_dotenv
 import re
 import time # <-- Added time module
-from image_to_video import create_video_clips_from_images
 
 # --- Environment Variables ---
 CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
@@ -121,7 +120,6 @@ if __name__ == "__main__":
         print("Starting new download cycle...")
         try:
             main()
-            create_video_clips_from_images("/output")
             scanStash()
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
