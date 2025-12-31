@@ -1,0 +1,24 @@
+name: Docker Image CI
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build the Docker image
+        run: docker build . --file Dockerfile --tag zacharyh728/reddit-downloader:${{ github.sha }}
+      
+      - name: Log in to Docker Hub
+        run: echo "${{ secrets.DOCKER_KEY }}" | docker login --username "zacharyh728" --password-stdin
+      
+      - name: Tag Frontend image as latest
+        run: docker tag zacharyh728/reddit-downloader:${{ github.sha }} zacharyh728/reddit-downloader:latest
+      
+      - name: Push the Backend Docker image
+        run: docker push zacharyh728/reddit-downloader:latest
