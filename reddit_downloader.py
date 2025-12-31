@@ -13,31 +13,29 @@ USERNAME = os.getenv("REDDIT_USERNAME")
 PASSWORD = os.getenv("REDDIT_PASSWORD")
 DOWNLOAD_LOCATION = os.getenv("DOWNLOAD_LOCATION", "./downloads")
 
-"""Sends a POST request to the Stash instance to scan for new media."""
-def scanStash():
-    url = "https://stash.zhill.me/graphql"
-    headers = {
-        "ApiKey": "TEST",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "query": "{ metadataScan }"
-    }
 
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
-        print("Status Code:", response.status_code)
-        print("Response Body:", response.json())
-    except requests.exceptions.RequestException as e:
-        print(f"An error occurred: {e}")
-
-def download_file(url, filename):
+def download_file(url, filename, check_size=False):
     """Downloads a file from a URL to a specified path."""
     filepath = os.path.join(DOWNLOAD_LOCATION, filename)
     if os.path.exists(filepath):
-        print(f"Skipped: {filename} already exists.")
-        return
+        if not check_size:
+            print(f"Skipped: {filename} already exists.")
+            return
+
+        try:
+            head_response = requests.head(url, allow_redirects=True)
+            remote_size = int(head_response.headers.get('content-length', 0))
+            local_size = os.path.getsize(filepath)
+            
+            if remote_size > 0 and remote_size == local_size:
+                print(f"Skipped: {filename} already exists and size matches.")
+                return
+            
+            print(f"Redownloading {filename}: Local size {local_size} vs Remote size {remote_size}")
+        except Exception as e:
+            print(f"Error checking size for {filename}: {e}")
+            return
+
     try:
         response = requests.get(url, stream=True)
         response.raise_for_status()  # Raise an exception for bad status codes
@@ -98,19 +96,39 @@ def main():
         # --- Handle RedGifs ---
         if "redgifs.com" in post.url:
             try:
-                # A simple way to get the video URL is to fetch the page and find it
-                response = requests.get(post.url)
-                response.raise_for_status()
-                # Find the mp4 URL in the page content
-                match = re.search(r'https?://[^\s"]+\.mp4', response.text)
-                if match:
-                    video_url = match.group(0)
+                # Extract ID
+                rg_match = re.search(r'redgifs\.com/(?:watch/|ifr/)?([a-zA-Z0-9]+)', post.url)
+                if not rg_match:
+                    print(f"Could not parse RedGifs ID from: {post.url}")
+                    continue
+                
+                video_id = rg_match.group(1)
+                
+                # Get Temp Token
+                auth_url = "https://api.redgifs.com/v2/auth/temporary"
+                headers = {"User-Agent": "Mozilla/5.0"}
+                auth_resp = requests.get(auth_url, headers=headers)
+                auth_resp.raise_for_status()
+                token = auth_resp.json()['token']
+                
+                # Get GIF Metadata
+                meta_url = f"https://api.redgifs.com/v2/gifs/{video_id}"
+                headers['Authorization'] = f"Bearer {token}"
+                meta_resp = requests.get(meta_url, headers=headers)
+                meta_resp.raise_for_status()
+                meta_data = meta_resp.json()
+                
+                # Extract HD URL
+                hd_url = meta_data.get('gif', {}).get('urls', {}).get('hd')
+                
+                if hd_url:
                     filename = f"{sanitized_title}.mp4"
-                    download_file(video_url, filename)
+                    download_file(hd_url, filename, check_size=True)
                 else:
-                    print(f"Could not find .mp4 for RedGif: {post.url}")
-            except requests.exceptions.RequestException as e:
-                print(f"Error fetching RedGif page {post.url}: {e}")
+                    print(f"No HD URL found for RedGif: {post.url}")
+
+            except Exception as e:
+                print(f"Error processing RedGif {post.url}: {e}")
             continue
 
 # --- Main execution loop ---
@@ -120,7 +138,6 @@ if __name__ == "__main__":
         print("Starting new download cycle...")
         try:
             main()
-            scanStash()
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
             print("Will retry after the delay.")
