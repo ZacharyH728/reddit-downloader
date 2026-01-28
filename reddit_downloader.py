@@ -14,6 +14,60 @@ PASSWORD = os.getenv("REDDIT_PASSWORD")
 DOWNLOAD_LOCATION = os.getenv("DOWNLOAD_LOCATION", "./downloads")
 
 
+class RedGifsClient:
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": "Mozilla/5.0"})
+        self.token = None
+
+    def _authenticate(self):
+        """Fetches a new temporary token."""
+        try:
+            auth_url = "https://api.redgifs.com/v2/auth/temporary"
+            response = self.session.get(auth_url)
+            response.raise_for_status()
+            data = response.json()
+            self.token = data.get('token')
+            # print("Successfully acquired new RedGifs token.")
+        except Exception as e:
+            print(f"Failed to authenticate with RedGifs: {e}")
+            self.token = None
+
+    def get_media_info(self, video_id):
+        """Fetches media metadata, handling token refresh on 401."""
+        if not self.token:
+            self._authenticate()
+            if not self.token:
+                return None
+
+        meta_url = f"https://api.redgifs.com/v2/gifs/{video_id}"
+        
+        # First attempt
+        headers = {'Authorization': f'Bearer {self.token}'}
+        try:
+            response = self.session.get(meta_url, headers=headers)
+            if response.status_code == 401:
+                # Token might be expired, refresh and retry once
+                # print("RedGifs token expired, refreshing...")
+                self._authenticate()
+                if self.token:
+                    headers['Authorization'] = f'Bearer {self.token}'
+                    response = self.session.get(meta_url, headers=headers)
+            
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 410:
+                # Video deleted
+                raise e 
+            print(f"Error fetching RedGifs metadata for {video_id}: {e}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error fetching RedGifs metadata for {video_id}: {e}")
+            return None
+
+
 def download_file(url, filename, check_size=False):
     """Downloads a file from a URL to a specified path. Returns True if skipped."""
     filepath = os.path.join(DOWNLOAD_LOCATION, filename)
@@ -68,6 +122,9 @@ def main():
 
     print("Successfully authenticated with Reddit.")
     
+    # Initialize RedGifs Client
+    redgifs_client = RedGifsClient()
+    
     deleted_redgifs_count = 0
     skipped_files_count = 0
 
@@ -111,20 +168,12 @@ def main():
                 
                 video_id = rg_match.group(1)
                 
-                # Get Temp Token
-                auth_url = "https://api.redgifs.com/v2/auth/temporary"
-                headers = {"User-Agent": "Mozilla/5.0"}
-                auth_resp = requests.get(auth_url, headers=headers)
-                auth_resp.raise_for_status()
-                token = auth_resp.json()['token']
-                
-                # Get GIF Metadata
-                meta_url = f"https://api.redgifs.com/v2/gifs/{video_id}"
-                headers['Authorization'] = f"Bearer {token}"
-                meta_resp = requests.get(meta_url, headers=headers)
-                meta_resp.raise_for_status()
-                meta_data = meta_resp.json()
-                
+                # Get GIF Metadata using the client
+                meta_data = redgifs_client.get_media_info(video_id)
+                if not meta_data:
+                    # Errors are already logged inside get_media_info
+                    continue
+
                 # Extract HD URL
                 hd_url = meta_data.get('gif', {}).get('urls', {}).get('hd')
                 
