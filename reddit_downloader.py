@@ -2,6 +2,8 @@ import os
 import praw
 import prawcore
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 import re
 import time # <-- Added time module
@@ -114,6 +116,18 @@ def main():
     if not os.path.exists(DOWNLOAD_LOCATION):
         os.makedirs(DOWNLOAD_LOCATION)
     
+    # Configure session with retries
+    session = requests.Session()
+    retries = Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
     # Authenticate with Reddit
     reddit = praw.Reddit(
         client_id=CLIENT_ID,
@@ -121,6 +135,7 @@ def main():
         user_agent=USER_AGENT,
         username=USERNAME,
         password=PASSWORD,
+        requestor_kwargs={'session': session}
     )
 
     print("Successfully authenticated with Reddit.")
