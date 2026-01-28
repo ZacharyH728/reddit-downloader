@@ -1,5 +1,6 @@
 import os
 import praw
+import prawcore
 import requests
 from dotenv import load_dotenv
 import re
@@ -208,6 +209,11 @@ if __name__ == "__main__":
         print("Starting new download cycle...")
         try:
             main()
+        except (prawcore.exceptions.RequestException, requests.exceptions.RequestException) as e:
+            print(f"Connection error occurred: {e}")
+            print("Will retry in 60 seconds...")
+            time.sleep(60)
+            continue
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
             print("Will retry after the delay.")
