@@ -15,12 +15,12 @@ DOWNLOAD_LOCATION = os.getenv("DOWNLOAD_LOCATION", "./downloads")
 
 
 def download_file(url, filename, check_size=False):
-    """Downloads a file from a URL to a specified path."""
+    """Downloads a file from a URL to a specified path. Returns True if skipped."""
     filepath = os.path.join(DOWNLOAD_LOCATION, filename)
     if os.path.exists(filepath):
         if not check_size:
             # print(f"Skipped: {filename} already exists.")
-            return
+            return True
 
         try:
             head_response = requests.head(url, allow_redirects=True)
@@ -28,13 +28,13 @@ def download_file(url, filename, check_size=False):
             local_size = os.path.getsize(filepath)
             
             if remote_size > 0 and remote_size == local_size:
-                print(f"Skipped: {filename} already exists and size matches.")
-                return
+                # print(f"Skipped: {filename} already exists and size matches.")
+                return True
             
             print(f"Redownloading {filename}: Local size {local_size} vs Remote size {remote_size}")
         except Exception as e:
             print(f"Error checking size for {filename}: {e}")
-            return
+            return False
 
     try:
         response = requests.get(url, stream=True)
@@ -45,6 +45,8 @@ def download_file(url, filename, check_size=False):
         print(f"Downloaded: {filename}")
     except requests.exceptions.RequestException as e:
         print(f"Error downloading {url}: {e}")
+    
+    return False
 
 def main():
     """Main function to download media from saved Reddit posts."""
@@ -67,6 +69,7 @@ def main():
     print("Successfully authenticated with Reddit.")
     
     deleted_redgifs_count = 0
+    skipped_files_count = 0
 
     # Get saved posts
     saved_posts = reddit.user.me().saved(limit=None)
@@ -84,7 +87,8 @@ def main():
                 media_type = post.media_metadata[media_id]['m'].split('/')[-1]
                 image_url = f"https://i.redd.it/{media_id}.{media_type}"
                 filename = f"{sanitized_title}_{i+1}.{media_type}"
-                download_file(image_url, filename)
+                if download_file(image_url, filename):
+                    skipped_files_count += 1
             continue
 
         # --- Handle i.redd.it and i.imgur.com images/gifs ---
@@ -92,7 +96,8 @@ def main():
             file_extension = post.url.split('.')[-1]
             if file_extension in ['jpg', 'jpeg', 'png', 'gif']:
                  filename = f"{sanitized_title}.{file_extension}"
-                 download_file(post.url, filename)
+                 if download_file(post.url, filename):
+                     skipped_files_count += 1
             continue
             
         # --- Handle RedGifs ---
@@ -125,7 +130,8 @@ def main():
                 
                 if hd_url:
                     filename = f"{sanitized_title}.mp4"
-                    download_file(hd_url, filename, check_size=True)
+                    if download_file(hd_url, filename, check_size=True):
+                        skipped_files_count += 1
                 else:
                     print(f"No HD URL found for RedGif: {post.url}")
 
@@ -140,6 +146,9 @@ def main():
 
     if deleted_redgifs_count > 0:
         print(f"Skipped {deleted_redgifs_count} deleted RedGifs this session.")
+    
+    if skipped_files_count > 0:
+        print(f"Skipped {skipped_files_count} files that already existed.")
 
 # --- Main execution loop ---
 if __name__ == "__main__":
