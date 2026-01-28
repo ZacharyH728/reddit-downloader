@@ -19,7 +19,7 @@ def download_file(url, filename, check_size=False):
     filepath = os.path.join(DOWNLOAD_LOCATION, filename)
     if os.path.exists(filepath):
         if not check_size:
-            print(f"Skipped: {filename} already exists.")
+            # print(f"Skipped: {filename} already exists.")
             return
 
         try:
@@ -66,6 +66,8 @@ def main():
 
     print("Successfully authenticated with Reddit.")
     
+    deleted_redgifs_count = 0
+
     # Get saved posts
     saved_posts = reddit.user.me().saved(limit=None)
 
@@ -127,9 +129,17 @@ def main():
                 else:
                     print(f"No HD URL found for RedGif: {post.url}")
 
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 410:
+                    deleted_redgifs_count += 1
+                else:
+                    print(f"Error processing RedGif {post.url}: {e}")
             except Exception as e:
                 print(f"Error processing RedGif {post.url}: {e}")
             continue
+
+    if deleted_redgifs_count > 0:
+        print(f"Skipped {deleted_redgifs_count} deleted RedGifs this session.")
 
 # --- Main execution loop ---
 if __name__ == "__main__":
