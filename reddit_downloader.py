@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 import re
 import time # <-- Added time module
 
+load_dotenv()
+
 # --- Environment Variables ---
 CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
 CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
@@ -110,9 +112,6 @@ def main():
     # Create download directory if it doesn't exist
     if not os.path.exists(DOWNLOAD_LOCATION):
         os.makedirs(DOWNLOAD_LOCATION)
-
-    # Load environment variables just before use in main logic
-    load_dotenv()
     
     # Authenticate with Reddit
     reddit = praw.Reddit(
