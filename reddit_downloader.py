@@ -25,8 +25,7 @@ logging.Logger.trace = trace
 # Get log level from environment, default to INFO
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
-# If the user sets a custom level that doesn't exist, fallback to INFO, 
-# but if they explicitly want TRACE (which isn't standard in logging module dict yet unless added), handle it.
+
 if LOG_LEVEL == "TRACE":
     numeric_level = TRACE_LEVEL_NUM
 
@@ -45,6 +44,7 @@ USER_AGENT = os.getenv("REDDIT_USER_AGENT")
 USERNAME = os.getenv("REDDIT_USERNAME")
 PASSWORD = os.getenv("REDDIT_PASSWORD")
 DOWNLOAD_LOCATION = os.getenv("DOWNLOAD_LOCATION", "./downloads")
+REDGIFS_PROXY = os.getenv("HTTPS_PROXY")  # New Variable
 
 
 class RedGifsClient:
@@ -54,13 +54,23 @@ class RedGifsClient:
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
+        
+        # Apply Proxy if configured
+        if REDGIFS_PROXY:
+            logger.info(f"Configuring RedGifs client with proxy: {REDGIFS_PROXY}")
+            self.session.proxies = {
+                'http': REDGIFS_PROXY,
+                'https': REDGIFS_PROXY
+            }
+
         self.token = None
 
     def _authenticate(self):
         """Fetches a new temporary token."""
         try:
             auth_url = "https://api.redgifs.com/v2/auth/temporary"
-            response = self.session.get(auth_url)
+            # Added timeout to avoid hanging on bad proxies
+            response = self.session.get(auth_url, timeout=15)
             response.raise_for_status()
             data = response.json()
             self.token = data.get('token')
@@ -81,14 +91,14 @@ class RedGifsClient:
         # First attempt
         headers = {'Authorization': f'Bearer {self.token}'}
         try:
-            response = self.session.get(meta_url, headers=headers)
+            response = self.session.get(meta_url, headers=headers, timeout=15)
             if response.status_code == 401:
                 # Token might be expired, refresh and retry once
                 logger.debug("RedGifs token expired, refreshing...")
                 self._authenticate()
                 if self.token:
                     headers['Authorization'] = f'Bearer {self.token}'
-                    response = self.session.get(meta_url, headers=headers)
+                    response = self.session.get(meta_url, headers=headers, timeout=15)
             
             response.raise_for_status()
             return response.json()
@@ -104,10 +114,16 @@ class RedGifsClient:
             return None
 
 
-def download_file(url, filename, check_size=False):
-    """Downloads a file from a URL to a specified path. Returns True if skipped."""
+def download_file(url, filename, session=None, check_size=False):
+    """
+    Downloads a file from a URL to a specified path. Returns True if skipped.
+    Accepts an optional 'session' argument to use specific proxies/headers.
+    """
     filepath = os.path.join(DOWNLOAD_LOCATION, filename)
     
+    # Use the specific session (e.g., RedGifs proxy session) or default requests
+    requester = session if session else requests
+
     # Log the file we are checking at TRACE level
     logger.trace(f"Checking file: {filename}")
 
@@ -117,7 +133,7 @@ def download_file(url, filename, check_size=False):
             return True
 
         try:
-            head_response = requests.head(url, allow_redirects=True)
+            head_response = requester.head(url, allow_redirects=True, timeout=15)
             remote_size = int(head_response.headers.get('content-length', 0))
             local_size = os.path.getsize(filepath)
             
@@ -131,12 +147,11 @@ def download_file(url, filename, check_size=False):
             return False
 
     try:
-        response = requests.get(url, stream=True)
-        response.raise_for_status()  # Raise an exception for bad status codes
+        response = requester.get(url, stream=True, timeout=30)
+        response.raise_for_status()
         with open(filepath, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        # Log successful download at TRACE level (per user request to put download status on trace)
         logger.trace(f"Downloaded: {filename}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Error downloading {url}: {e}")
@@ -149,7 +164,7 @@ def main():
     if not os.path.exists(DOWNLOAD_LOCATION):
         os.makedirs(DOWNLOAD_LOCATION)
     
-    # Configure session with retries
+    # Configure Reddit session with retries
     session = requests.Session()
     retries = Retry(
         total=5,
@@ -173,14 +188,13 @@ def main():
 
     logger.info("Successfully authenticated with Reddit.")
     
-    # Initialize RedGifs Client
+    # Initialize RedGifs Client (Proxies are loaded here if env var is set)
     redgifs_client = RedGifsClient()
     
     deleted_redgifs_count = 0
     skipped_files_count = 0
 
     # Get saved posts
-    # Note: Fetching saved posts can take time, might want a log here if it blocks, but leaving as is.
     saved_posts = reddit.user.me().saved(limit=None)
 
     for post in saved_posts:
@@ -231,7 +245,9 @@ def main():
                 
                 if hd_url:
                     filename = f"{sanitized_title}.mp4"
-                    if download_file(hd_url, filename, check_size=True):
+                    # IMPORTANT: We pass the redgifs_client.session here!
+                    # This ensures the download uses the PROXY configured in the client.
+                    if download_file(hd_url, filename, session=redgifs_client.session, check_size=True):
                         skipped_files_count += 1
                 else:
                     logger.warning(f"No HD URL found for RedGif: {post.url}")
