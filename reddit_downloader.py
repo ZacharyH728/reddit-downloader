@@ -6,9 +6,37 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 import re
-import time # <-- Added time module
+import time
+import logging
+import sys
 
 load_dotenv()
+
+# --- Logging Setup ---
+TRACE_LEVEL_NUM = 5
+logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
+
+def trace(self, message, *args, **kws):
+    if self.isEnabledFor(TRACE_LEVEL_NUM):
+        self._log(TRACE_LEVEL_NUM, message, args, **kws)
+
+logging.Logger.trace = trace
+
+# Get log level from environment, default to INFO
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
+# If the user sets a custom level that doesn't exist, fallback to INFO, 
+# but if they explicitly want TRACE (which isn't standard in logging module dict yet unless added), handle it.
+if LOG_LEVEL == "TRACE":
+    numeric_level = TRACE_LEVEL_NUM
+
+logging.basicConfig(
+    level=numeric_level,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+logger = logging.getLogger(__name__)
 
 # --- Environment Variables ---
 CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
@@ -36,9 +64,9 @@ class RedGifsClient:
             response.raise_for_status()
             data = response.json()
             self.token = data.get('token')
-            # print("Successfully acquired new RedGifs token.")
+            logger.trace("Successfully acquired new RedGifs token.")
         except Exception as e:
-            print(f"Failed to authenticate with RedGifs: {e}")
+            logger.error(f"Failed to authenticate with RedGifs: {e}")
             self.token = None
 
     def get_media_info(self, video_id):
@@ -56,7 +84,7 @@ class RedGifsClient:
             response = self.session.get(meta_url, headers=headers)
             if response.status_code == 401:
                 # Token might be expired, refresh and retry once
-                # print("RedGifs token expired, refreshing...")
+                logger.debug("RedGifs token expired, refreshing...")
                 self._authenticate()
                 if self.token:
                     headers['Authorization'] = f'Bearer {self.token}'
@@ -69,19 +97,23 @@ class RedGifsClient:
             if e.response.status_code == 410:
                 # Video deleted
                 raise e 
-            print(f"Error fetching RedGifs metadata for {video_id}: {e}")
+            logger.error(f"Error fetching RedGifs metadata for {video_id}: {e}")
             return None
         except Exception as e:
-            print(f"Unexpected error fetching RedGifs metadata for {video_id}: {e}")
+            logger.error(f"Unexpected error fetching RedGifs metadata for {video_id}: {e}")
             return None
 
 
 def download_file(url, filename, check_size=False):
     """Downloads a file from a URL to a specified path. Returns True if skipped."""
     filepath = os.path.join(DOWNLOAD_LOCATION, filename)
+    
+    # Log the file we are checking at TRACE level
+    logger.trace(f"Checking file: {filename}")
+
     if os.path.exists(filepath):
         if not check_size:
-            # print(f"Skipped: {filename} already exists.")
+            logger.trace(f"Skipped: {filename} already exists.")
             return True
 
         try:
@@ -90,12 +122,12 @@ def download_file(url, filename, check_size=False):
             local_size = os.path.getsize(filepath)
             
             if remote_size > 0 and remote_size == local_size:
-                # print(f"Skipped: {filename} already exists and size matches.")
+                logger.trace(f"Skipped: {filename} already exists and size matches.")
                 return True
             
-            print(f"Redownloading {filename}: Local size {local_size} vs Remote size {remote_size}")
+            logger.info(f"Redownloading {filename}: Local size {local_size} vs Remote size {remote_size}")
         except Exception as e:
-            print(f"Error checking size for {filename}: {e}")
+            logger.error(f"Error checking size for {filename}: {e}")
             return False
 
     try:
@@ -104,9 +136,10 @@ def download_file(url, filename, check_size=False):
         with open(filepath, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        print(f"Downloaded: {filename}")
+        # Log successful download at TRACE level (per user request to put download status on trace)
+        logger.trace(f"Downloaded: {filename}")
     except requests.exceptions.RequestException as e:
-        print(f"Error downloading {url}: {e}")
+        logger.error(f"Error downloading {url}: {e}")
     
     return False
 
@@ -138,7 +171,7 @@ def main():
         requestor_kwargs={'session': session}
     )
 
-    print("Successfully authenticated with Reddit.")
+    logger.info("Successfully authenticated with Reddit.")
     
     # Initialize RedGifs Client
     redgifs_client = RedGifsClient()
@@ -147,6 +180,7 @@ def main():
     skipped_files_count = 0
 
     # Get saved posts
+    # Note: Fetching saved posts can take time, might want a log here if it blocks, but leaving as is.
     saved_posts = reddit.user.me().saved(limit=None)
 
     for post in saved_posts:
@@ -181,7 +215,7 @@ def main():
                 # Extract ID
                 rg_match = re.search(r'redgifs\.com/(?:watch/|ifr/)?([a-zA-Z0-9]+)', post.url)
                 if not rg_match:
-                    print(f"Could not parse RedGifs ID from: {post.url}")
+                    logger.warning(f"Could not parse RedGifs ID from: {post.url}")
                     continue
                 
                 video_id = rg_match.group(1)
@@ -200,40 +234,40 @@ def main():
                     if download_file(hd_url, filename, check_size=True):
                         skipped_files_count += 1
                 else:
-                    print(f"No HD URL found for RedGif: {post.url}")
+                    logger.warning(f"No HD URL found for RedGif: {post.url}")
 
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 410:
                     deleted_redgifs_count += 1
                 else:
-                    print(f"Error processing RedGif {post.url}: {e}")
+                    logger.error(f"Error processing RedGif {post.url}: {e}")
             except Exception as e:
-                print(f"Error processing RedGif {post.url}: {e}")
+                logger.error(f"Error processing RedGif {post.url}: {e}")
             continue
 
     if deleted_redgifs_count > 0:
-        print(f"Skipped {deleted_redgifs_count} deleted RedGifs this session.")
+        logger.info(f"Skipped {deleted_redgifs_count} deleted RedGifs this session.")
     
     if skipped_files_count > 0:
-        print(f"Skipped {skipped_files_count} files that already existed.")
+        logger.info(f"Skipped {skipped_files_count} files that already existed.")
 
 # --- Main execution loop ---
 if __name__ == "__main__":
     while True:
-        print("-------------------------------------------")
-        print("Starting new download cycle...")
+        logger.info("-------------------------------------------")
+        logger.info("Starting new download cycle...")
         try:
             main()
         except (prawcore.exceptions.RequestException, requests.exceptions.RequestException) as e:
-            print(f"Connection error occurred: {e}")
-            print("Will retry in 60 seconds...")
+            logger.error(f"Connection error occurred: {e}")
+            logger.info("Will retry in 60 seconds...")
             time.sleep(60)
             continue
         except Exception as e:
-            print(f"An unexpected error occurred: {e}")
-            print("Will retry after the delay.")
+            logger.exception(f"An unexpected error occurred: {e}")
+            logger.info("Will retry after the delay.")
         
-        print("\nDownload cycle finished. Waiting for 1 hour...")
-        print("-------------------------------------------\n")
+        logger.info("Download cycle finished. Waiting for 1 hour...")
+        logger.info("-------------------------------------------\n")
         # Wait for 1 hour (3600 seconds) before the next run
         time.sleep(3600)
