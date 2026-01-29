@@ -45,6 +45,7 @@ USERNAME = os.getenv("REDDIT_USERNAME")
 PASSWORD = os.getenv("REDDIT_PASSWORD")
 DOWNLOAD_LOCATION = os.getenv("DOWNLOAD_LOCATION", "./downloads")
 TIME_BETWEEN_DOWNLOADS = int(os.getenv("TIME_BETWEEN_DOWNLOADS", "3600"))  # in seconds
+CONSECUTIVE_SKIP_LIMIT = int(os.getenv("CONSECUTIVE_SKIP_LIMIT", "0"))
 
 class RedGifsClient:
     def __init__(self):
@@ -182,6 +183,7 @@ def main():
     
     deleted_redgifs_count = 0
     skipped_files_count = 0
+    consecutive_skipped_count = 0
 
     saved_posts = reddit.user.me().saved(limit=None)
 
@@ -200,6 +202,13 @@ def main():
                 # Use the main session (efficient)
                 if download_file(image_url, filename, session=session):
                     skipped_files_count += 1
+                    consecutive_skipped_count += 1
+                else:
+                    consecutive_skipped_count = 0
+                
+                if CONSECUTIVE_SKIP_LIMIT > 0 and consecutive_skipped_count >= CONSECUTIVE_SKIP_LIMIT:
+                    logger.info(f"Consecutive skip limit ({CONSECUTIVE_SKIP_LIMIT}) reached. Stopping download session.")
+                    return
             continue
 
         # --- Handle i.redd.it and i.imgur.com ---
@@ -210,6 +219,13 @@ def main():
                  # Use the main session
                  if download_file(post.url, filename, session=session):
                      skipped_files_count += 1
+                     consecutive_skipped_count += 1
+                 else:
+                     consecutive_skipped_count = 0
+                 
+                 if CONSECUTIVE_SKIP_LIMIT > 0 and consecutive_skipped_count >= CONSECUTIVE_SKIP_LIMIT:
+                     logger.info(f"Consecutive skip limit ({CONSECUTIVE_SKIP_LIMIT}) reached. Stopping download session.")
+                     return
             continue
             
         # --- Handle RedGifs ---
@@ -234,6 +250,13 @@ def main():
                     # Use the main session for the download
                     if download_file(hd_url, filename, session=session, check_size=True):
                         skipped_files_count += 1
+                        consecutive_skipped_count += 1
+                    else:
+                        consecutive_skipped_count = 0
+                    
+                    if CONSECUTIVE_SKIP_LIMIT > 0 and consecutive_skipped_count >= CONSECUTIVE_SKIP_LIMIT:
+                        logger.info(f"Consecutive skip limit ({CONSECUTIVE_SKIP_LIMIT}) reached. Stopping download session.")
+                        return
                 else:
                     logger.warning(f"No HD URL found for RedGif: {post.url}")
 
