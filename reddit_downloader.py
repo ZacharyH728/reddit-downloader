@@ -175,13 +175,15 @@ def download_file(url, filename, session=None, check_size=False):
 
 def main():
     """Main function to download media from saved Reddit posts."""
-    # Create download directory if it doesn't exist
     if not os.path.exists(DOWNLOAD_LOCATION):
         os.makedirs(DOWNLOAD_LOCATION)
-        
     
-    # Configure Reddit session with retries
+    # Configure session with retries
     session = requests.Session()
+    
+    # CRITICAL: Force Reddit session to ignore environment proxies
+    session.trust_env = False 
+
     retries = Retry(
         total=5,
         backoff_factor=1,
@@ -191,8 +193,6 @@ def main():
     adapter = HTTPAdapter(max_retries=retries)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-
-    session.trust_env = False
 
     # Authenticate with Reddit
     reddit = praw.Reddit(
@@ -206,7 +206,7 @@ def main():
 
     logger.info("Successfully authenticated with Reddit.")
     
-    # Initialize RedGifs Client (Proxies are loaded here if env var is set)
+    # Initialize RedGifs Client (Proxies are loaded here)
     redgifs_client = RedGifsClient()
     
     deleted_redgifs_count = 0
@@ -217,7 +217,6 @@ def main():
 
     for post in saved_posts:
         title = post.title
-        # Sanitize the title to use as a filename
         sanitized_title = re.sub(r'[\\/*?:"<>|]', "", title)
 
         # --- Handle Galleries ---
@@ -228,16 +227,18 @@ def main():
                 media_type = post.media_metadata[media_id]['m'].split('/')[-1]
                 image_url = f"https://i.redd.it/{media_id}.{media_type}"
                 filename = f"{sanitized_title}_{i+1}.{media_type}"
-                if download_file(image_url, filename):
+                # UPDATE: Pass the safe 'session' here
+                if download_file(image_url, filename, session=session): 
                     skipped_files_count += 1
             continue
 
-        # --- Handle i.redd.it and i.imgur.com images/gifs ---
+        # --- Handle i.redd.it and i.imgur.com ---
         if "i.redd.it" in post.url or "i.imgur.com" in post.url:
             file_extension = post.url.split('.')[-1]
             if file_extension in ['jpg', 'jpeg', 'png', 'gif']:
                  filename = f"{sanitized_title}.{file_extension}"
-                 if download_file(post.url, filename):
+                 # UPDATE: Pass the safe 'session' here
+                 if download_file(post.url, filename, session=session):
                      skipped_files_count += 1
             continue
             
@@ -252,10 +253,9 @@ def main():
                 
                 video_id = rg_match.group(1)
                 
-                # Get GIF Metadata using the client
+                # Get GIF Metadata via Proxy
                 meta_data = redgifs_client.get_media_info(video_id)
                 if not meta_data:
-                    # Errors are already logged inside get_media_info
                     continue
 
                 # Extract HD URL
@@ -263,8 +263,7 @@ def main():
                 
                 if hd_url:
                     filename = f"{sanitized_title}.mp4"
-                    # IMPORTANT: We pass the redgifs_client.session here!
-                    # This ensures the download uses the PROXY configured in the client.
+                    # KEEP: Pass redgifs_client.session (Proxy) here
                     if download_file(hd_url, filename, session=redgifs_client.session, check_size=True):
                         skipped_files_count += 1
                 else:
