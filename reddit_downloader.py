@@ -9,23 +9,8 @@ import re
 import time
 import logging
 import sys
-import socket  # Make sure this is imported
-# ... other imports ...
-
-# --- FORCE IPv4 PATCH START ---
-# This forces requests to only use IPv4, fixing the "Address type not supported" error
-original_getaddrinfo = socket.getaddrinfo
-
-def ipv4_only_getaddrinfo(*args, **kwargs):
-    responses = original_getaddrinfo(*args, **kwargs)
-    # Filter out anything that isn't IPv4 (AF_INET)
-    return [r for r in responses if r[0] == socket.AF_INET] 
-
-socket.getaddrinfo = ipv4_only_getaddrinfo
-# --- FORCE IPv4 PATCH END ---
 
 load_dotenv()
-# ... rest of your script ...
 
 # --- Logging Setup ---
 TRACE_LEVEL_NUM = 5
@@ -59,33 +44,22 @@ USER_AGENT = os.getenv("REDDIT_USER_AGENT")
 USERNAME = os.getenv("REDDIT_USERNAME")
 PASSWORD = os.getenv("REDDIT_PASSWORD")
 DOWNLOAD_LOCATION = os.getenv("DOWNLOAD_LOCATION", "./downloads")
-REDGIFS_PROXY = os.getenv("HTTPS_PROXY")  # New Variable
-
+TIME_BETWEEN_DOWNLOADS = int(os.getenv("TIME_BETWEEN_DOWNLOADS", "3600"))  # in seconds
 
 class RedGifsClient:
     def __init__(self):
         self.session = requests.Session()
-        # Use a real browser User-Agent to avoid generic bot detection
+        # Use a real browser User-Agent
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
-        
-        # Apply Proxy if configured
-        if REDGIFS_PROXY:
-            logger.info(f"Configuring RedGifs client with proxy: {REDGIFS_PROXY}")
-            self.session.proxies = {
-                'http': REDGIFS_PROXY,
-                'https': REDGIFS_PROXY
-            }
-
         self.token = None
 
     def _authenticate(self):
         """Fetches a new temporary token."""
         try:
             auth_url = "https://api.redgifs.com/v2/auth/temporary"
-            # Added timeout to avoid hanging on bad proxies
-            response = self.session.get(auth_url, timeout=15)
+            response = self.session.get(auth_url, timeout=20)
             response.raise_for_status()
             data = response.json()
             self.token = data.get('token')
@@ -106,14 +80,14 @@ class RedGifsClient:
         # First attempt
         headers = {'Authorization': f'Bearer {self.token}'}
         try:
-            response = self.session.get(meta_url, headers=headers, timeout=15)
+            response = self.session.get(meta_url, headers=headers, timeout=20)
             if response.status_code == 401:
                 # Token might be expired, refresh and retry once
                 logger.debug("RedGifs token expired, refreshing...")
                 self._authenticate()
                 if self.token:
                     headers['Authorization'] = f'Bearer {self.token}'
-                    response = self.session.get(meta_url, headers=headers, timeout=15)
+                    response = self.session.get(meta_url, headers=headers, timeout=20)
             
             response.raise_for_status()
             return response.json()
@@ -131,15 +105,14 @@ class RedGifsClient:
 
 def download_file(url, filename, session=None, check_size=False):
     """
-    Downloads a file from a URL to a specified path. Returns True if skipped.
-    Accepts an optional 'session' argument to use specific proxies/headers.
+    Downloads a file from a URL.
+    Uses 'session' if provided, otherwise uses standard requests.
     """
     filepath = os.path.join(DOWNLOAD_LOCATION, filename)
     
-    # Use the specific session (e.g., RedGifs proxy session) or default requests
+    # Use the specific session or fallback to requests
     requester = session if session else requests
 
-    # Log the file we are checking at TRACE level
     logger.trace(f"Checking file: {filename}")
 
     if os.path.exists(filepath):
@@ -162,7 +135,7 @@ def download_file(url, filename, session=None, check_size=False):
             return False
 
     try:
-        response = requester.get(url, stream=True, timeout=30)
+        response = requester.get(url, stream=True, timeout=60)
         response.raise_for_status()
         with open(filepath, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
@@ -178,10 +151,9 @@ def main():
     if not os.path.exists(DOWNLOAD_LOCATION):
         os.makedirs(DOWNLOAD_LOCATION)
     
-    # Configure session with retries
+    # Configure shared session with retries
     session = requests.Session()
-    
-    # CRITICAL: Force Reddit session to ignore environment proxies
+    # Good practice: ignore env proxies to prevent accidental interference
     session.trust_env = False 
 
     retries = Retry(
@@ -206,13 +178,11 @@ def main():
 
     logger.info("Successfully authenticated with Reddit.")
     
-    # Initialize RedGifs Client (Proxies are loaded here)
     redgifs_client = RedGifsClient()
     
     deleted_redgifs_count = 0
     skipped_files_count = 0
 
-    # Get saved posts
     saved_posts = reddit.user.me().saved(limit=None)
 
     for post in saved_posts:
@@ -227,8 +197,8 @@ def main():
                 media_type = post.media_metadata[media_id]['m'].split('/')[-1]
                 image_url = f"https://i.redd.it/{media_id}.{media_type}"
                 filename = f"{sanitized_title}_{i+1}.{media_type}"
-                # UPDATE: Pass the safe 'session' here
-                if download_file(image_url, filename, session=session): 
+                # Use the main session (efficient)
+                if download_file(image_url, filename, session=session):
                     skipped_files_count += 1
             continue
 
@@ -237,7 +207,7 @@ def main():
             file_extension = post.url.split('.')[-1]
             if file_extension in ['jpg', 'jpeg', 'png', 'gif']:
                  filename = f"{sanitized_title}.{file_extension}"
-                 # UPDATE: Pass the safe 'session' here
+                 # Use the main session
                  if download_file(post.url, filename, session=session):
                      skipped_files_count += 1
             continue
@@ -245,7 +215,6 @@ def main():
         # --- Handle RedGifs ---
         if "redgifs.com" in post.url:
             try:
-                # Extract ID
                 rg_match = re.search(r'redgifs\.com/(?:watch/|ifr/)?([a-zA-Z0-9]+)', post.url)
                 if not rg_match:
                     logger.warning(f"Could not parse RedGifs ID from: {post.url}")
@@ -253,18 +222,17 @@ def main():
                 
                 video_id = rg_match.group(1)
                 
-                # Get GIF Metadata via Proxy
+                # Get GIF Metadata
                 meta_data = redgifs_client.get_media_info(video_id)
                 if not meta_data:
                     continue
 
-                # Extract HD URL
                 hd_url = meta_data.get('gif', {}).get('urls', {}).get('hd')
                 
                 if hd_url:
                     filename = f"{sanitized_title}.mp4"
-                    # KEEP: Pass redgifs_client.session (Proxy) here
-                    if download_file(hd_url, filename, session=redgifs_client.session, check_size=True):
+                    # Use the main session for the download
+                    if download_file(hd_url, filename, session=session, check_size=True):
                         skipped_files_count += 1
                 else:
                     logger.warning(f"No HD URL found for RedGif: {post.url}")
@@ -284,7 +252,6 @@ def main():
     if skipped_files_count > 0:
         logger.info(f"Skipped {skipped_files_count} files that already existed.")
 
-# --- Main execution loop ---
 if __name__ == "__main__":
     while True:
         logger.info("-------------------------------------------")
@@ -302,5 +269,4 @@ if __name__ == "__main__":
         
         logger.info("Download cycle finished. Waiting for 1 hour...")
         logger.info("-------------------------------------------\n")
-        # Wait for 1 hour (3600 seconds) before the next run
-        time.sleep(3600)
+        time.sleep(TIME_BETWEEN_DOWNLOADS)
