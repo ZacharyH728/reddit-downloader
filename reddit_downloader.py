@@ -163,6 +163,7 @@ def main():
     # Create download directory if it doesn't exist
     if not os.path.exists(DOWNLOAD_LOCATION):
         os.makedirs(DOWNLOAD_LOCATION)
+        
     
     # Configure Reddit session with retries
     session = requests.Session()
@@ -175,6 +176,8 @@ def main():
     adapter = HTTPAdapter(max_retries=retries)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+
+    session.trust_env = False
 
     # Authenticate with Reddit
     reddit = praw.Reddit(
