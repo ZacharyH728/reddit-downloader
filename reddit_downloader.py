@@ -9,8 +9,23 @@ import re
 import time
 import logging
 import sys
+import socket  # Make sure this is imported
+# ... other imports ...
+
+# --- FORCE IPv4 PATCH START ---
+# This forces requests to only use IPv4, fixing the "Address type not supported" error
+original_getaddrinfo = socket.getaddrinfo
+
+def ipv4_only_getaddrinfo(*args, **kwargs):
+    responses = original_getaddrinfo(*args, **kwargs)
+    # Filter out anything that isn't IPv4 (AF_INET)
+    return [r for r in responses if r[0] == socket.AF_INET] 
+
+socket.getaddrinfo = ipv4_only_getaddrinfo
+# --- FORCE IPv4 PATCH END ---
 
 load_dotenv()
+# ... rest of your script ...
 
 # --- Logging Setup ---
 TRACE_LEVEL_NUM = 5
