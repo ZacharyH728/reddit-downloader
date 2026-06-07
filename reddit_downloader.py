@@ -160,7 +160,7 @@ def main():
     retries = Retry(
         total=5,
         backoff_factor=1,
-        status_forcelist=[500, 502, 503, 504],
+        status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
     )
     adapter = HTTPAdapter(max_retries=retries)
@@ -247,13 +247,14 @@ def main():
                 
                 if hd_url:
                     filename = f"{sanitized_title}.mp4"
-                    # Use the main session for the download
-                    if download_file(hd_url, filename, session=session, check_size=True):
+                    if download_file(hd_url, filename, session=redgifs_client.session, check_size=True):
                         skipped_files_count += 1
                         consecutive_skipped_count += 1
                     else:
                         consecutive_skipped_count = 0
-                    
+
+                    time.sleep(1)
+
                     if CONSECUTIVE_SKIP_LIMIT > 0 and consecutive_skipped_count >= CONSECUTIVE_SKIP_LIMIT:
                         logger.info(f"Consecutive skip limit ({CONSECUTIVE_SKIP_LIMIT}) reached. Stopping download session.")
                         return
