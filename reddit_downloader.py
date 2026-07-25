@@ -9,6 +9,8 @@ import re
 import time
 import logging
 import sys
+import shutil
+import subprocess
 
 load_dotenv()
 
@@ -46,6 +48,10 @@ PASSWORD = os.getenv("REDDIT_PASSWORD")
 DOWNLOAD_LOCATION = os.getenv("DOWNLOAD_LOCATION", "./downloads")
 TIME_BETWEEN_DOWNLOADS = int(os.getenv("TIME_BETWEEN_DOWNLOADS", "3600"))  # in seconds
 CONSECUTIVE_SKIP_LIMIT = int(os.getenv("CONSECUTIVE_SKIP_LIMIT", "0"))
+
+FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
+if not FFMPEG_AVAILABLE:
+    logger.warning("ffmpeg not found on PATH: v.redd.it videos will be saved without audio.")
 
 class RedGifsClient:
     def __init__(self):
@@ -144,8 +150,79 @@ def download_file(url, filename, session=None, check_size=False):
         logger.trace(f"Downloaded: {filename}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Error downloading {url}: {e}")
-    
+
     return False
+
+def _url_exists(url, session):
+    """HEAD-checks a URL without logging on a plain 404 (used for the optional
+    audio track, which most v.redd.it videos simply don't have)."""
+    try:
+        response = session.head(url, allow_redirects=True, timeout=15)
+        return response.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
+
+def download_reddit_video(post, filename, session):
+    """
+    Downloads a v.redd.it (native Reddit-hosted) video. Reddit serves video and
+    audio as separate DASH tracks: post.media['reddit_video']['fallback_url'] is
+    video-only. This fetches the matching audio track when one exists and muxes
+    the two with ffmpeg, falling back to video-only if there's no audio track
+    or ffmpeg isn't available. Returns True/False for success.
+    """
+    reddit_video = getattr(post, "media", None) and post.media.get("reddit_video")
+    if not reddit_video:
+        logger.warning(f"No reddit_video metadata found for: {post.url}")
+        return False
+
+    video_url = reddit_video.get("fallback_url")
+    if not video_url:
+        logger.warning(f"No fallback_url found for v.redd.it post: {post.url}")
+        return False
+
+    filepath = os.path.join(DOWNLOAD_LOCATION, filename)
+    video_tmp_name = f"{filename}.video.tmp"
+    audio_tmp_name = f"{filename}.audio.tmp"
+    video_tmp_path = os.path.join(DOWNLOAD_LOCATION, video_tmp_name)
+    audio_tmp_path = os.path.join(DOWNLOAD_LOCATION, audio_tmp_name)
+
+    try:
+        download_file(video_url, video_tmp_name, session=session)
+        if not os.path.exists(video_tmp_path):
+            logger.error(f"Failed to download v.redd.it video: {post.url}")
+            return False
+
+        audio_url = re.sub(r'DASH_\d+\.mp4.*$', 'DASH_audio.mp4', video_url)
+        has_audio = FFMPEG_AVAILABLE and _url_exists(audio_url, session)
+        if has_audio:
+            download_file(audio_url, audio_tmp_name, session=session)
+            has_audio = os.path.exists(audio_tmp_path)
+
+        if has_audio:
+            try:
+                result = subprocess.run(
+                    ['ffmpeg', '-y', '-i', video_tmp_path, '-i', audio_tmp_path,
+                     '-c', 'copy', '-map', '0:v:0', '-map', '1:a:0', filepath],
+                    capture_output=True, timeout=120,
+                )
+                if result.returncode != 0 or not os.path.exists(filepath):
+                    raise RuntimeError(result.stderr.decode(errors='ignore')[-300:])
+            except Exception as e:
+                logger.warning(f"ffmpeg mux failed for {filename}, saving video-only: {e}")
+                if os.path.exists(video_tmp_path):
+                    os.replace(video_tmp_path, filepath)
+        else:
+            os.replace(video_tmp_path, filepath)
+
+        logger.trace(f"Downloaded: {filename}")
+        return True
+    except Exception as e:
+        logger.error(f"Error processing v.redd.it video {post.url}: {e}")
+        return False
+    finally:
+        for tmp in (video_tmp_path, audio_tmp_path):
+            if os.path.exists(tmp):
+                os.remove(tmp)
 
 def main():
     """Main function to download media from saved Reddit posts."""
@@ -235,31 +312,39 @@ def main():
                 if not rg_match:
                     logger.warning(f"Could not parse RedGifs ID from: {post.url}")
                     continue
-                
+
                 video_id = rg_match.group(1)
-                
-                # Get GIF Metadata
-                meta_data = redgifs_client.get_media_info(video_id)
-                if not meta_data:
-                    continue
+                filename = f"{sanitized_title}.mp4"
+                filepath = os.path.join(DOWNLOAD_LOCATION, filename)
 
-                hd_url = meta_data.get('gif', {}).get('urls', {}).get('hd')
-                
-                if hd_url:
-                    filename = f"{sanitized_title}.mp4"
-                    if download_file(hd_url, filename, session=redgifs_client.session, check_size=True):
-                        skipped_files_count += 1
-                        consecutive_skipped_count += 1
-                    else:
-                        consecutive_skipped_count = 0
-
-                    time.sleep(1)
-
-                    if CONSECUTIVE_SKIP_LIMIT > 0 and consecutive_skipped_count >= CONSECUTIVE_SKIP_LIMIT:
-                        logger.info(f"Consecutive skip limit ({CONSECUTIVE_SKIP_LIMIT}) reached. Stopping download session.")
-                        return
+                # Skip already-downloaded RedGifs without ever touching the RedGifs
+                # API. Without this, every already-downloaded item paid for a
+                # metadata GET, a size-check HEAD, and a 1s sleep, every single
+                # cycle, forever — the i.redd.it/gallery branches get this same
+                # skip for free from download_file()'s default check_size=False.
+                if os.path.exists(filepath):
+                    logger.trace(f"Skipped: {filename} already exists.")
+                    skipped_files_count += 1
+                    consecutive_skipped_count += 1
                 else:
-                    logger.warning(f"No HD URL found for RedGif: {post.url}")
+                    # Get GIF Metadata
+                    meta_data = redgifs_client.get_media_info(video_id)
+                    if not meta_data:
+                        continue
+
+                    hd_url = meta_data.get('gif', {}).get('urls', {}).get('hd')
+
+                    if hd_url:
+                        download_file(hd_url, filename, session=redgifs_client.session, check_size=True)
+                        consecutive_skipped_count = 0
+                        time.sleep(1)
+                    else:
+                        logger.warning(f"No HD URL found for RedGif: {post.url}")
+                        continue
+
+                if CONSECUTIVE_SKIP_LIMIT > 0 and consecutive_skipped_count >= CONSECUTIVE_SKIP_LIMIT:
+                    logger.info(f"Consecutive skip limit ({CONSECUTIVE_SKIP_LIMIT}) reached. Stopping download session.")
+                    return
 
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 410:
@@ -269,6 +354,25 @@ def main():
             except Exception as e:
                 logger.error(f"Error processing RedGif {post.url}: {e}")
             continue
+
+        # --- Handle v.redd.it (native Reddit-hosted video) ---
+        if "v.redd.it" in post.url:
+            filename = f"{sanitized_title}.mp4"
+            if os.path.exists(os.path.join(DOWNLOAD_LOCATION, filename)):
+                skipped_files_count += 1
+                consecutive_skipped_count += 1
+            else:
+                download_reddit_video(post, filename, session)
+                consecutive_skipped_count = 0
+
+            if CONSECUTIVE_SKIP_LIMIT > 0 and consecutive_skipped_count >= CONSECUTIVE_SKIP_LIMIT:
+                logger.info(f"Consecutive skip limit ({CONSECUTIVE_SKIP_LIMIT}) reached. Stopping download session.")
+                return
+            continue
+
+        # Anything else (self-text posts, external links, crossposts, etc.) has no
+        # handler — log it so gaps in the library are visible instead of silent.
+        logger.debug(f"No handler for saved post, skipping: {post.url}")
 
     if deleted_redgifs_count > 0:
         logger.info(f"Skipped {deleted_redgifs_count} deleted RedGifs this session.")

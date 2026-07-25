@@ -7,6 +7,10 @@ ENV PYTHONUNBUFFERED=1
 # Set the working directory in the container
 WORKDIR /app
 
+# ffmpeg muxes audio into v.redd.it videos (Reddit serves them as separate tracks)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy the requirements file into the container at /app
 COPY requirements.txt .
 
