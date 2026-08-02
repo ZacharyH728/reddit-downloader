@@ -1,4 +1,5 @@
 import os
+import json
 import praw
 import prawcore
 import requests
@@ -47,11 +48,52 @@ USERNAME = os.getenv("REDDIT_USERNAME")
 PASSWORD = os.getenv("REDDIT_PASSWORD")
 DOWNLOAD_LOCATION = os.getenv("DOWNLOAD_LOCATION", "./downloads")
 TIME_BETWEEN_DOWNLOADS = int(os.getenv("TIME_BETWEEN_DOWNLOADS", "3600"))  # in seconds
-CONSECUTIVE_SKIP_LIMIT = int(os.getenv("CONSECUTIVE_SKIP_LIMIT", "0"))
 
 FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 if not FFMPEG_AVAILABLE:
     logger.warning("ffmpeg not found on PATH: v.redd.it videos will be saved without audio.")
+
+# --- Download manifest ---
+# Maps each downloaded Reddit post ID -> list of filenames it owns. Dedup is keyed
+# on the unique post ID (not the title-derived filename), so two DIFFERENT posts
+# that happen to share a title no longer collide: the second one is saved under a
+# name suffixed with its post ID instead of being silently skipped. Posts are
+# processed oldest-first, so a pre-existing file is claimed by the OLDER post and
+# a newer same-title save is the one that gets the suffix + a real download.
+MANIFEST_FILE = os.path.join(DOWNLOAD_LOCATION, ".download_manifest.json")
+
+
+def load_manifest():
+    """Return (posts_dict, owned_files_set). posts_dict: post_id -> [filenames]."""
+    try:
+        with open(MANIFEST_FILE, "r", encoding="utf-8") as f:
+            posts = json.load(f).get("posts", {})
+    except (FileNotFoundError, json.JSONDecodeError):
+        posts = {}
+    owned = set()
+    for files in posts.values():
+        owned.update(files)
+    return posts, owned
+
+
+def save_manifest(posts):
+    """Atomically persist the manifest so an interrupted run keeps its progress."""
+    tmp = MANIFEST_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"posts": posts}, f)
+        os.replace(tmp, MANIFEST_FILE)
+    except OSError as e:
+        logger.error(f"Failed to write download manifest: {e}")
+
+
+def resolve_filename(base, ext, post_id, owned_files):
+    """Pick a filename for `base.ext`, appending `_<post_id>` if that name is
+    already owned by a different post (title collision)."""
+    name = f"{base}.{ext}"
+    if name in owned_files:
+        name = f"{base}_{post_id}.{ext}"
+    return name
 
 class RedGifsClient:
     def __init__(self):
@@ -260,125 +302,151 @@ def main():
     
     deleted_redgifs_count = 0
     skipped_files_count = 0
-    consecutive_skipped_count = 0
+    downloaded_files_count = 0
 
-    saved_posts = reddit.user.me().saved(limit=None)
+    manifest, owned_files = load_manifest()
+    dirty = 0
 
-    for post in saved_posts:
+    def have(name):
+        return os.path.exists(os.path.join(DOWNLOAD_LOCATION, name))
+
+    def persist(force=False):
+        nonlocal dirty
+        if force or dirty >= 50:
+            save_manifest(manifest)
+            dirty = 0
+
+    # Materialize and process OLDEST-first: a pre-existing file is then claimed by
+    # the older post that owns it, and any newer same-title save is the one that
+    # gets a post-ID-suffixed name and an actual download (instead of being
+    # skipped as a false duplicate).
+    saved_posts = list(reddit.user.me().saved(limit=None))
+    logger.info(f"Processing {len(saved_posts)} saved items (oldest-first).")
+
+    for post in reversed(saved_posts):
+        post_id = getattr(post, "id", None)
+
+        # Fast path: this exact post was already downloaded in a previous run.
+        # (Delete .download_manifest.json to force a full re-verify.)
+        if post_id and post_id in manifest:
+            skipped_files_count += 1
+            continue
+
+        # Only link/media submissions have titles + urls; skip saved comments etc.
+        if not hasattr(post, "title") or not hasattr(post, "url"):
+            logger.debug(f"No handler for saved item {post_id}: not a media submission.")
+            continue
+
         title = post.title
         sanitized_title = re.sub(r'[\\/*?:"<>|]', "", title)
+        recorded = []  # filenames this post ends up owning
 
-        # --- Handle Galleries ---
-        if hasattr(post, "is_gallery") and post.is_gallery:
-            gallery_items = post.gallery_data['items']
-            for i, item in enumerate(gallery_items):
-                media_id = item['media_id']
-                media_type = post.media_metadata[media_id]['m'].split('/')[-1]
-                image_url = f"https://i.redd.it/{media_id}.{media_type}"
-                filename = f"{sanitized_title}_{i+1}.{media_type}"
-                # Use the main session (efficient)
-                if download_file(image_url, filename, session=session):
+        try:
+            # --- Handle Galleries ---
+            if hasattr(post, "is_gallery") and post.is_gallery:
+                gallery_items = post.gallery_data['items']
+                # If the base name is already taken by a different post, suffix the
+                # whole gallery with the post ID — kept BEFORE the _<n> index so the
+                # viewer's gallery-grouping (…_1, …_2) still matches.
+                gallery_base = sanitized_title
+                first = gallery_items[0]
+                first_type = post.media_metadata[first['media_id']]['m'].split('/')[-1]
+                if f"{sanitized_title}_1.{first_type}" in owned_files:
+                    gallery_base = f"{sanitized_title}_{post_id}"
+                for i, item in enumerate(gallery_items):
+                    media_id = item['media_id']
+                    media_type = post.media_metadata[media_id]['m'].split('/')[-1]
+                    image_url = f"https://i.redd.it/{media_id}.{media_type}"
+                    filename = f"{gallery_base}_{i+1}.{media_type}"
+                    owned_files.add(filename)
+                    recorded.append(filename)
+                    if have(filename):
+                        logger.trace(f"Have: {filename}")
+                        skipped_files_count += 1
+                    else:
+                        download_file(image_url, filename, session=session)
+                        downloaded_files_count += 1
+
+            # --- Handle i.redd.it and i.imgur.com ---
+            elif "i.redd.it" in post.url or "i.imgur.com" in post.url:
+                file_extension = post.url.split('.')[-1]
+                if file_extension not in ['jpg', 'jpeg', 'png', 'gif']:
+                    logger.debug(f"Unsupported image extension for {post.url}")
+                    continue
+                filename = resolve_filename(sanitized_title, file_extension, post_id, owned_files)
+                owned_files.add(filename)
+                recorded.append(filename)
+                if have(filename):
+                    logger.trace(f"Have: {filename}")
                     skipped_files_count += 1
-                    consecutive_skipped_count += 1
                 else:
-                    consecutive_skipped_count = 0
-                
-                if CONSECUTIVE_SKIP_LIMIT > 0 and consecutive_skipped_count >= CONSECUTIVE_SKIP_LIMIT:
-                    logger.info(f"Consecutive skip limit ({CONSECUTIVE_SKIP_LIMIT}) reached. Stopping download session.")
-                    return
-            continue
+                    download_file(post.url, filename, session=session)
+                    downloaded_files_count += 1
 
-        # --- Handle i.redd.it and i.imgur.com ---
-        if "i.redd.it" in post.url or "i.imgur.com" in post.url:
-            file_extension = post.url.split('.')[-1]
-            if file_extension in ['jpg', 'jpeg', 'png', 'gif']:
-                 filename = f"{sanitized_title}.{file_extension}"
-                 # Use the main session
-                 if download_file(post.url, filename, session=session):
-                     skipped_files_count += 1
-                     consecutive_skipped_count += 1
-                 else:
-                     consecutive_skipped_count = 0
-                 
-                 if CONSECUTIVE_SKIP_LIMIT > 0 and consecutive_skipped_count >= CONSECUTIVE_SKIP_LIMIT:
-                     logger.info(f"Consecutive skip limit ({CONSECUTIVE_SKIP_LIMIT}) reached. Stopping download session.")
-                     return
-            continue
-            
-        # --- Handle RedGifs ---
-        if "redgifs.com" in post.url:
-            try:
+            # --- Handle RedGifs ---
+            elif "redgifs.com" in post.url:
                 rg_match = re.search(r'redgifs\.com/(?:watch/|ifr/)?([a-zA-Z0-9]+)', post.url)
                 if not rg_match:
                     logger.warning(f"Could not parse RedGifs ID from: {post.url}")
                     continue
-
                 video_id = rg_match.group(1)
-                filename = f"{sanitized_title}.mp4"
-                filepath = os.path.join(DOWNLOAD_LOCATION, filename)
-
-                # Skip already-downloaded RedGifs without ever touching the RedGifs
-                # API. Without this, every already-downloaded item paid for a
-                # metadata GET, a size-check HEAD, and a 1s sleep, every single
-                # cycle, forever — the i.redd.it/gallery branches get this same
-                # skip for free from download_file()'s default check_size=False.
-                if os.path.exists(filepath):
-                    logger.trace(f"Skipped: {filename} already exists.")
+                filename = resolve_filename(sanitized_title, "mp4", post_id, owned_files)
+                owned_files.add(filename)
+                recorded.append(filename)
+                # Claim an already-downloaded RedGif without ever touching the
+                # RedGifs API (no metadata GET / HEAD / 1s sleep for existing files).
+                if have(filename):
+                    logger.trace(f"Have: {filename}")
                     skipped_files_count += 1
-                    consecutive_skipped_count += 1
                 else:
-                    # Get GIF Metadata
                     meta_data = redgifs_client.get_media_info(video_id)
                     if not meta_data:
                         continue
-
                     hd_url = meta_data.get('gif', {}).get('urls', {}).get('hd')
-
-                    if hd_url:
-                        download_file(hd_url, filename, session=redgifs_client.session, check_size=True)
-                        consecutive_skipped_count = 0
-                        time.sleep(1)
-                    else:
+                    if not hd_url:
                         logger.warning(f"No HD URL found for RedGif: {post.url}")
                         continue
+                    download_file(hd_url, filename, session=redgifs_client.session, check_size=True)
+                    downloaded_files_count += 1
+                    time.sleep(1)
 
-                if CONSECUTIVE_SKIP_LIMIT > 0 and consecutive_skipped_count >= CONSECUTIVE_SKIP_LIMIT:
-                    logger.info(f"Consecutive skip limit ({CONSECUTIVE_SKIP_LIMIT}) reached. Stopping download session.")
-                    return
-
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 410:
-                    deleted_redgifs_count += 1
+            # --- Handle v.redd.it (native Reddit-hosted video) ---
+            elif "v.redd.it" in post.url:
+                filename = resolve_filename(sanitized_title, "mp4", post_id, owned_files)
+                owned_files.add(filename)
+                recorded.append(filename)
+                if have(filename):
+                    logger.trace(f"Have: {filename}")
+                    skipped_files_count += 1
                 else:
-                    logger.error(f"Error processing RedGif {post.url}: {e}")
-            except Exception as e:
-                logger.error(f"Error processing RedGif {post.url}: {e}")
-            continue
+                    download_reddit_video(post, filename, session)
+                    downloaded_files_count += 1
 
-        # --- Handle v.redd.it (native Reddit-hosted video) ---
-        if "v.redd.it" in post.url:
-            filename = f"{sanitized_title}.mp4"
-            if os.path.exists(os.path.join(DOWNLOAD_LOCATION, filename)):
-                skipped_files_count += 1
-                consecutive_skipped_count += 1
+            # Anything else (self-text, external links, crossposts, etc.) has no
+            # handler — log it so gaps in the library are visible instead of silent.
             else:
-                download_reddit_video(post, filename, session)
-                consecutive_skipped_count = 0
+                logger.debug(f"No handler for saved post, skipping: {post.url}")
+                continue
 
-            if CONSECUTIVE_SKIP_LIMIT > 0 and consecutive_skipped_count >= CONSECUTIVE_SKIP_LIMIT:
-                logger.info(f"Consecutive skip limit ({CONSECUTIVE_SKIP_LIMIT}) reached. Stopping download session.")
-                return
+        except requests.exceptions.HTTPError as e:
+            if getattr(e.response, "status_code", None) == 410:
+                deleted_redgifs_count += 1  # deleted upstream; leave unrecorded so it can 404 out
+            else:
+                logger.error(f"Error processing {post.url}: {e}")
+            continue
+        except Exception as e:
+            logger.error(f"Error processing {post.url}: {e}")
             continue
 
-        # Anything else (self-text posts, external links, crossposts, etc.) has no
-        # handler — log it so gaps in the library are visible instead of silent.
-        logger.debug(f"No handler for saved post, skipping: {post.url}")
+        # Record what this post owns so future runs skip it by ID in O(1).
+        if post_id and recorded:
+            manifest[post_id] = recorded
+            dirty += 1
+            persist()
 
-    if deleted_redgifs_count > 0:
-        logger.info(f"Skipped {deleted_redgifs_count} deleted RedGifs this session.")
-    
-    if skipped_files_count > 0:
-        logger.info(f"Skipped {skipped_files_count} files that already existed.")
+    persist(force=True)
+
+    logger.info(f"Cycle summary: {downloaded_files_count} downloaded, {skipped_files_count} already had, {deleted_redgifs_count} deleted upstream.")
 
 if __name__ == "__main__":
     while True:
