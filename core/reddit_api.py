@@ -22,6 +22,7 @@ import html
 import os
 import re
 import threading
+from urllib.parse import urlsplit
 
 import praw
 import prawcore
@@ -33,7 +34,11 @@ from core.redgifs import RedGifsGone, gif_media_url, gif_preview_url, gif_thumb_
 
 # Extensions the original accepted for direct image links. Anything else is skipped.
 IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif']
-REDGIFS_ID_RE = re.compile(r'redgifs\.com/(?:watch/|ifr/)?([a-zA-Z0-9]+)')
+# Path segments that are route prefixes, never gif ids.
+_REDGIFS_PATH_NOISE = frozenset(
+    ["watch", "ifr", "i", "v", "gifs", "detail", "users", "gallery", "embed"])
+# Shortest plausible gif id. RedGifs ids are long concatenated words.
+_REDGIFS_MIN_ID = 3
 # Placeholder values Reddit uses in `thumbnail` when there is no real thumbnail.
 _THUMB_PLACEHOLDERS = frozenset(["self", "default", "nsfw", "spoiler", "image", ""])
 # Only worth spending an API call on an exact-name lookup if it could be a name.
@@ -54,6 +59,30 @@ def _clean_url(url):
     if not url:
         return None
     return html.unescape(url)
+
+
+def redgifs_id_from_url(url):
+    """Pull a gif id out of any of RedGifs' URL shapes, or return None.
+
+    They use /watch/<id>, /ifr/<id>, /i/<id> and bare /<id>. Matching with an
+    optional prefix group is the obvious approach and is wrong: on /i/<id> the
+    prefix group doesn't match, so the capture happily returns "i" as the id.
+    Taking the last meaningful path segment can't make that mistake, and copes
+    with prefixes we haven't seen.
+    """
+    if not url:
+        return None
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if host != "redgifs.com" and not host.endswith(".redgifs.com"):
+        return None
+    for segment in reversed([s for s in parts.path.split("/") if s]):
+        candidate = segment.split(".")[0]
+        if candidate.lower() in _REDGIFS_PATH_NOISE:
+            continue
+        if len(candidate) >= _REDGIFS_MIN_ID and candidate.isalnum():
+            return candidate
+    return None
 
 
 # --- authentication ---------------------------------------------------------
@@ -355,13 +384,13 @@ def describe_submission(post):
 
     # --- RedGifs ---
     if "redgifs.com" in url:
-        match = REDGIFS_ID_RE.search(url)
-        if not match:
+        gif_id = redgifs_id_from_url(url)
+        if not gif_id:
             return None
         base.update({
             "kind": "redgifs",
             "ext": "mp4",
-            "redgifs_id": match.group(1),
+            "redgifs_id": gif_id,
             "url": url,
             # The RedGifs CDN URL isn't in the Reddit response; the lightbox
             # resolves it lazily via /api/redgifs/gif/<id>.
