@@ -66,6 +66,9 @@ def make_reddit(session):
         username=config.USERNAME,
         password=config.PASSWORD,
         requestor_kwargs={'session': session},
+        # Otherwise praw prints an "outdated version" notice to stdout on first
+        # use, interleaved with the application's own logs.
+        check_for_updates=False,
     )
 
 
@@ -203,8 +206,13 @@ def list_redditor_posts(reddit, username, limit=30, after=None, sort="new"):
         "hot": listing.hot,
     }.get(sort, listing.new)
 
-    params = {"after": after} if after else None
-    generator = method(limit=limit, params=params)
+    # `params` must be omitted entirely on the first page, not passed as None.
+    # PRAW's _safely_add_arguments does `deepcopy(arguments[key]).update(...)`
+    # when the key is present, so an explicit None raises AttributeError.
+    kwargs = {"limit": limit}
+    if after:
+        kwargs["params"] = {"after": after}
+    generator = method(**kwargs)
     items = list(generator)
     # A short page means the listing is exhausted.
     cursor = items[-1].fullname if len(items) >= limit and items else None
