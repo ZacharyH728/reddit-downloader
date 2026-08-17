@@ -65,6 +65,22 @@ def test_index_references_only_assets_that_exist(client):
         assert client.get("/static/" + name).status_code == 200, name
 
 
+def test_hidden_attribute_beats_display_classes():
+    """Every element the UI toggles with `hidden` also carries a class that sets
+    `display`, which wins on specificity over the UA's `[hidden]` rule. Without an
+    explicit override the lightbox covers the page permanently and cannot be
+    dismissed, because setting `.hidden = true` in JS has no visual effect.
+    """
+    html = open(os.path.join(STATIC_DIR, "index.html"), encoding="utf-8").read()
+    css = open(os.path.join(STATIC_DIR, "style.css"), encoding="utf-8").read()
+
+    # The markup must actually still rely on `hidden` for this to matter.
+    assert re.search(r"<[^>]*\shidden[\s>]", html), "no element uses the hidden attribute"
+
+    override = re.search(r"\[hidden\]\s*\{[^}]*display\s*:\s*none\s*!important", css)
+    assert override, "style.css needs `[hidden] { display: none !important; }`"
+
+
 def test_health_works_without_any_credentials(client):
     body = client.get("/api/health").get_json()
     assert body["ok"] is True
