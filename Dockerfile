@@ -1,8 +1,11 @@
-# Use an official Python runtime as a parent image
-FROM python:3.9-slim
+# Use an official Python runtime as a parent image.
+# 3.9 reached end of life in October 2025 and receives no further security fixes.
+FROM python:3.12-slim
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONUTF8=1
+ENV WEB_PORT=8080
 
 # Set the working directory in the container
 WORKDIR /app
@@ -20,5 +23,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application's code into the container at /app
 COPY . .
 
-# Run the script when the container launches
-CMD ["python", "reddit_downloader.py"]
+EXPOSE 8080
+
+# Runs the web UI and the hourly saved-posts sync in one process.
+# Set WEB_ENABLED=false for the original daemon-only behavior.
+CMD ["python", "app.py"]

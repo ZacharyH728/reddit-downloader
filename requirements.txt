@@ -1,4 +1,8 @@
-praw
-requests
-python-dotenv
-pysocks
+# Pinned with ~= so a major release can't break an image rebuild on its own.
+# urllib3 has already renamed a Retry argument once (method_whitelist ->
+# allowed_methods), which this code depends on.
+praw~=7.8
+requests~=2.32
+python-dotenv~=1.0
+Flask~=3.1
+waitress~=3.0

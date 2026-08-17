@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Creator Downloader</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="#/" title="Search">&#9660;&#9660;</a>
+  <form class="searchbar" id="search-form" autocomplete="off">
+    <input type="search" id="search-input" placeholder="Search creators&hellip;"
+           aria-label="Search creators" spellcheck="false">
+    <div class="platform-toggle" id="platform-toggle" role="group" aria-label="Platform">
+      <button type="button" data-platform="both" class="on">Both</button>
+      <button type="button" data-platform="reddit">Reddit</button>
+      <button type="button" data-platform="redgifs">RedGifs</button>
+    </div>
+    <button type="submit" class="primary">Search</button>
+  </form>
+  <button type="button" id="jobs-button" class="jobs-button" aria-label="Downloads">
+    Downloads <span class="badge" id="jobs-badge" hidden>0</span>
+  </button>
+</header>
+
+<div id="banner-area" aria-live="polite"></div>
+
+<main id="view"></main>
+
+<div id="actionbar" class="actionbar" hidden>
+  <span id="selection-count">0 selected</span>
+  <button type="button" id="select-all">Select all loaded</button>
+  <button type="button" id="clear-selection">Clear</button>
+  <button type="button" id="download-selected" class="primary">Download selected</button>
+</div>
+
+<aside id="jobs-drawer" class="drawer" hidden aria-label="Downloads">
+  <div class="drawer-head">
+    <strong>Downloads</strong>
+    <button type="button" id="jobs-close" aria-label="Close">&times;</button>
+  </div>
+  <div id="jobs-list" class="drawer-body"></div>
+</aside>
+
+<div id="lightbox" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="Preview">
+  <button type="button" class="lb-close" id="lb-close" aria-label="Close">&times;</button>
+  <button type="button" class="lb-nav lb-prev" id="lb-prev" aria-label="Previous">&#8249;</button>
+  <div class="lb-stage" id="lb-stage"></div>
+  <button type="button" class="lb-nav lb-next" id="lb-next" aria-label="Next">&#8250;</button>
+  <div class="lb-meta" id="lb-meta"></div>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<script src="/static/app.js" type="module"></script>
+</body>
+</html>

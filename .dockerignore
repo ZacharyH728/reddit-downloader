@@ -1,0 +1,18 @@
+.git
+.github
+.gitignore
+.dockerignore
+.DS_Store
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+tests/
+requirements-dev.txt
+# Never bake the media library into the image.
+downloads/
+.env
+docker-compose.yaml
+docker-compose.yml
