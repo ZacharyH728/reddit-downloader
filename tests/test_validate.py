@@ -16,7 +16,7 @@ def test_valid_platforms(raw):
     assert validate_platform(raw) in ("reddit", "redgifs")
 
 
-@pytest.mark.parametrize("raw", ["", None, "twitter", "../reddit", "reddit/x", "redditx"])
+@pytest.mark.parametrize("raw", ["", None, "facebook", "../reddit", "reddit/x", "redditx"])
 def test_invalid_platforms(raw):
     with pytest.raises(ValidationError) as exc:
         validate_platform(raw)

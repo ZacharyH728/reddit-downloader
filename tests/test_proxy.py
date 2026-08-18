@@ -27,6 +27,8 @@ ALLOWED = [
     "https://media.redgifs.com./x.mp4",       # trailing dot is still the same host
     "https://www.redditmedia.com/x.jpg",
     "https://styles.redditmedia.com/x.png",
+    "https://pbs.twimg.com/media/ABC123?format=jpg&name=orig",
+    "https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/x.mp4",
 ]
 
 REJECTED = [
@@ -47,6 +49,13 @@ REJECTED = [
     ("https://myi.redd.it.evil.com/x.jpg", "bad_host"),
     # the API must never be proxied
     ("https://api.redgifs.com/v2/gifs/abc", "bad_host"),
+    # twimg is allowlisted by exact host, so the rest of the domain stays out -
+    # abs.twimg.com serves site JavaScript, and api.x.com is an API.
+    ("https://abs.twimg.com/responsive-web/client-web/main.js", "bad_host"),
+    ("https://pbs.twimg.com.evil.com/x.jpg", "bad_host"),
+    ("https://evil-pbs.twimg.com/x.jpg", "bad_host"),
+    ("https://api.x.com/1.1/statuses/show.json", "bad_host"),
+    ("https://x.com/someone/media", "bad_host"),
     # IP literals: cloud metadata and LAN services
     ("https://169.254.169.254/latest/meta-data/", "bad_host"),
     ("https://127.0.0.1/x.jpg", "bad_host"),
@@ -127,6 +136,22 @@ def test_content_type_comes_from_the_url_not_upstream(local):
     """An upstream that mislabels a .jpg as text/html must not have that echoed."""
     _body, headers, _status = drain(local + "/htmlerror.jpg")
     assert headers["Content-Type"] == "image/jpeg"
+
+
+@pytest.mark.parametrize("url,expected", [
+    # pbs.twimg.com leaves the path extensionless and puts the format in the
+    # query, so there is nothing for the path-based branch to find.
+    ("https://pbs.twimg.com/media/ABC123?format=jpg&name=orig", "image/jpeg"),
+    ("https://pbs.twimg.com/media/ABC123?format=png&name=small", "image/png"),
+    ("https://pbs.twimg.com/media/ABC123?format=webp&name=orig", "image/webp"),
+    # A path extension still wins over the query.
+    ("https://video.twimg.com/ext_tw_video/1/pu/vid/720x1280/x.mp4", "video/mp4"),
+    # An unknown format falls through to the upstream header, not to a guess.
+    ("https://pbs.twimg.com/media/ABC123?format=exe&name=orig",
+     "application/octet-stream"),
+])
+def test_twimg_content_type_is_read_from_the_query(url, expected):
+    assert mediaproxy._content_type_for(url, None) == expected
 
 
 def test_gone_upstream_maps_to_410(local):

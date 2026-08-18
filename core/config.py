@@ -4,6 +4,7 @@ Everything here was previously the top-of-file block in reddit_downloader.py.
 The existing variables keep their exact names, defaults, and semantics; the new
 ones are all defaulted so an existing deployment keeps working untouched.
 """
+import importlib.util
 import logging
 import os
 import shutil
@@ -110,9 +111,30 @@ MEDIA_PROXY_ALWAYS = _bool("MEDIA_PROXY_ALWAYS", False)
 # Replaces the old hardcoded `time.sleep(1)` after each RedGifs download.
 REDGIFS_MIN_INTERVAL = _float("REDGIFS_MIN_INTERVAL", 1.0)
 
+# --- X / Twitter ---
+# The `auth_token` cookie from a logged-in x.com session. X serves almost nothing
+# to anonymous clients now, so without this the platform is simply unavailable
+# (search, listing and downloads all fail) rather than partially working.
+TWITTER_AUTH_TOKEN = os.getenv("TWITTER_AUTH_TOKEN") or None
+# X rate-limits timeline paging far more aggressively than Reddit does. This
+# paces our own calls; it is not a substitute for handling their 429s.
+TWITTER_MIN_INTERVAL = _float("TWITTER_MIN_INTERVAL", 1.0)
+# Include media from retweets. Off by default: the point of a creator download is
+# that creator's own work, and retweets duplicate whatever the original author's
+# folder already holds.
+TWITTER_RETWEETS = _bool("TWITTER_RETWEETS", False)
+# X exposes no honest total for a media timeline and throttles deep paging, so a
+# "download everything" job is bounded here rather than running until banned.
+TWITTER_MAX_ITEMS = _int("TWITTER_MAX_ITEMS", 3000)
+
 FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 if not FFMPEG_AVAILABLE:
     logger.warning("ffmpeg not found on PATH: v.redd.it videos will be saved without audio.")
+
+# Checked with find_spec rather than a real import: core.twitter imports this
+# module, so importing it back here would be circular.
+GALLERY_DL_AVAILABLE = importlib.util.find_spec("gallery_dl") is not None
+TWITTER_ENABLED = GALLERY_DL_AVAILABLE and bool(TWITTER_AUTH_TOKEN)
 
 # --- Download manifest ---
 # Maps each downloaded Reddit post ID -> list of filenames it owns. Dedup is keyed
@@ -145,5 +167,17 @@ def startup_warnings():
         warnings.append({
             "code": "ffmpeg_missing",
             "message": "ffmpeg not found on PATH: v.redd.it videos will be saved without audio.",
+        })
+    if not GALLERY_DL_AVAILABLE:
+        warnings.append({
+            "code": "gallery_dl_missing",
+            "message": ("gallery-dl is not installed, so X/Twitter is unavailable. "
+                        "Install it with: pip install gallery-dl"),
+        })
+    elif not TWITTER_AUTH_TOKEN:
+        warnings.append({
+            "code": "twitter_auth_missing",
+            "message": ("TWITTER_AUTH_TOKEN is unset, so X/Twitter is unavailable. "
+                        "Copy the `auth_token` cookie from a logged-in x.com session."),
         })
     return warnings

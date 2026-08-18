@@ -6,3 +6,8 @@ requests~=2.32
 python-dotenv~=1.0
 Flask~=3.1
 waitress~=3.0
+# X/Twitter metadata only - it never writes a file here, downloads still go
+# through core.net. Optional: without it X is reported unavailable and the rest
+# of the app is unaffected. Unpinned minor version on purpose, because the fix
+# for one of X's GraphQL query-ID rotations usually arrives as a new release.
+gallery-dl~=1.32

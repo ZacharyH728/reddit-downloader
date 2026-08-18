@@ -10,11 +10,14 @@ import threading
 
 import prawcore
 
-from core import config, net, reddit_api
+from core import config, net, reddit_api, twitter
 from core.config import logger
 from core.manifest import Manifest
 from core.redgifs import RedGifsClient, RedGifsGone
-from core.validate import ValidationError, safe_child_dir, validate_creator, validate_platform
+from core.twitter import (TwitterAuthError, TwitterNotFound, TwitterUnavailable,
+                          TwitterUpstreamError)
+from core.validate import (PLATFORMS, ValidationError, safe_child_dir, validate_creator,
+                           validate_platform)
 
 # Reddit will not serve more than roughly this many items from a user listing,
 # no matter how the request is paged.
@@ -127,6 +130,32 @@ def search(query, platform="both", limit=25):
             section["error"] = "RedGifs search is unavailable."
         out["redgifs"] = section
 
+    if platform in ("both", "twitter"):
+        # Exact handles only. X's user-search endpoints need the same logged-in
+        # session and gallery-dl does not expose them, so there is no fuzzy
+        # index to query - `query` is either a handle or it is nothing.
+        section = {"results": [], "error": None, "exact_only": True}
+        if not twitter.available():
+            section["error"] = twitter.unavailable_reason()
+        else:
+            try:
+                profile = get_creator_profile("twitter", query, quiet=True)
+                if profile:
+                    section["results"] = [profile]
+                else:
+                    section["error"] = "No X account with that exact handle."
+            except TwitterAuthError:
+                section["error"] = ("X rejected the saved session; refresh "
+                                    "TWITTER_AUTH_TOKEN.")
+            except ValidationError:
+                section["error"] = "That is not a valid X handle."
+            except TwitterUpstreamError:
+                section["error"] = "X is unavailable."
+            except Exception as e:  # noqa: BLE001
+                logger.error("X lookup failed for %r: %s", query, e)
+                section["error"] = "X is unavailable."
+        out["twitter"] = section
+
     # Annotate anything already present on disk.
     for section in out.values():
         for result in section["results"]:
@@ -166,6 +195,8 @@ def get_creator_profile(platform, name, quiet=False):
             if not quiet:
                 logger.error("Reddit profile lookup failed for %s: %s", name, e)
             return None
+    if platform == "twitter":
+        return twitter.get_user(name)
     user = get_redgifs().get_user(name)
     return _redgifs_result(user) if user else None
 
@@ -183,6 +214,10 @@ def _annotate(desc, manifest, saved_ids, max_len):
         have, reason = False, None
     return {
         "id": desc["id"],
+        # The lightbox needs to tell an X video (silent GIF, nothing missing)
+        # apart from a v.redd.it one (audio muxed in only at download time).
+        "source": desc.get("source"),
+        "has_audio": desc.get("has_audio"),
         "kind": desc["kind"],
         "title": desc["title"],
         "created_utc": desc.get("created_utc"),
@@ -233,6 +268,18 @@ def list_items(platform, name, cursor=None, limit=30, sort="new", kind="all", on
             reddit, name, limit=limit, after=cursor, sort=sort)
         descs = [d for d in (reddit_api.describe_submission(p) for p in posts) if d]
         result["next"] = next_cursor
+    elif platform == "twitter":
+        if not twitter.available():
+            raise TwitterUnavailable(twitter.unavailable_reason())
+        try:
+            data = twitter.list_media_page(name, cursor=cursor, limit=limit)
+        except TwitterNotFound:
+            raise CreatorUnavailable(platform, name) from None
+        descs = [d for d in (reddit_api.describe_tweet(t) for t in data["tweets"]) if d]
+        result["next"] = data["next"]
+        # X reports no timeline total, so the grid shows a bare loaded count
+        # rather than a fraction. `total` stays None on purpose.
+        result["truncated_reason"] = "x_no_total"
     else:
         page = 1
         if cursor:
@@ -286,7 +333,10 @@ def get_creator(platform, name):
         "profile": profile,
         "have": have,
         "dest": creator_label(platform, name),
-        "listing_cap": REDDIT_LISTING_CAP if platform == "reddit" else None,
+        "listing_cap": {
+            "reddit": REDDIT_LISTING_CAP,
+            "twitter": config.TWITTER_MAX_ITEMS,
+        }.get(platform),
     }
 
 
@@ -297,7 +347,7 @@ def local_library():
     a source is down, or the creator has since been suspended.
     """
     out = []
-    for platform in ("reddit", "redgifs"):
+    for platform in PLATFORMS:
         base = os.path.join(config.CREATOR_ROOT, platform)
         if not os.path.isdir(base):
             continue
@@ -353,6 +403,18 @@ def resolve_selected(platform, name, item_ids):
         return [found[i] for i in item_ids if i in found], \
                [i for i in item_ids if i not in found]
 
+    if platform == "twitter":
+        descs = []
+        missing = []
+        for item_id in item_ids:
+            tweet = twitter.get_tweet(item_id)
+            desc = reddit_api.describe_tweet(tweet) if tweet else None
+            if desc:
+                descs.append(desc)
+            else:
+                missing.append(item_id)
+        return descs, missing
+
     client = get_redgifs()
     descs = []
     missing = []
@@ -401,6 +463,18 @@ def iter_all_items(platform, name, page_size=100, should_stop=None):
                 return
         return
 
+    if platform == "twitter":
+        if not twitter.available():
+            raise TwitterUnavailable(twitter.unavailable_reason())
+        # One uninterrupted generator, deliberately: gallery-dl's cursor moves a
+        # whole API page at a time, so resuming a half-consumed page would drop
+        # items. See the note in core/twitter.py.
+        for tweet in twitter.iter_all_media(name, should_stop=should_stop):
+            desc = reddit_api.describe_tweet(tweet)
+            if desc:
+                yield desc
+        return
+
     client = get_redgifs()
     page = 1
     while not should_stop():
@@ -423,6 +497,11 @@ def total_estimate(platform, name):
     if platform == "redgifs":
         data = get_redgifs().list_creator_gifs(name, page=1, count=1)
         return data["total"] if data else None
+    if platform == "twitter":
+        # `media_count` counts media *files*, not tweets, and we enumerate by
+        # tweet - so it would over-report and leave the progress bar stuck short
+        # of 100%. An honest unknown is better than a wrong number.
+        return None
     return None
 
 

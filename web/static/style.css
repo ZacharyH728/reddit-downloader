@@ -100,6 +100,8 @@ main { padding: 16px 14px 96px; max-width: 1600px; margin: 0 auto; }
   letter-spacing: .08em; color: var(--muted);
 }
 .section-title .err { color: var(--warn); text-transform: none; letter-spacing: 0; }
+/* Not a warning: a standing property of the platform (X has no fuzzy search). */
+.section-title .hint { color: var(--muted); text-transform: none; letter-spacing: 0; }
 
 /* --- creator result rows --- */
 

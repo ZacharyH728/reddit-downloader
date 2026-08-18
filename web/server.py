@@ -14,10 +14,12 @@ import os
 import prawcore
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from core import config, creators, jobs, sync
+from core import config, creators, jobs, sync, twitter
 from core.config import logger
-from core.validate import (ValidationError, validate_creator, validate_item_id,
-                           validate_platform)
+from core.twitter import (TwitterAuthError, TwitterNotFound, TwitterUnavailable,
+                          TwitterUpstreamError)
+from core.validate import (PLATFORMS, ValidationError, validate_creator,
+                           validate_item_id, validate_platform)
 from web import mediaproxy
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -43,6 +45,19 @@ def handle_errors(fn):
         except creators.CreatorUnavailable as e:
             return _error("creator_not_found",
                           "No such %s creator: %s" % (e.platform, e.name), 404)
+        except TwitterAuthError as e:
+            # 401 rather than 502: this is fixed by refreshing the cookie, not by
+            # waiting, and the UI shows a different banner for it.
+            logger.warning("X rejected the session: %s", e)
+            return _error("twitter_auth", "X rejected the saved session. "
+                          "Refresh TWITTER_AUTH_TOKEN and restart.", 401)
+        except TwitterUnavailable as e:
+            return _error("twitter_unavailable", str(e), 503)
+        except TwitterNotFound:
+            return _error("creator_not_found", "That X account does not exist.", 404)
+        except TwitterUpstreamError as e:
+            logger.error("X failed on %s: %s", request.path, e)
+            return _error("upstream_error", "X is unavailable right now.", 502)
         except prawcore.exceptions.TooManyRequests as e:
             retry = getattr(e, "retry_after", None)
             return _error("rate_limited", "Reddit is rate limiting us.", 429,
@@ -94,6 +109,10 @@ def create_app(manager=None):
             "nsfw_blur": True,
             "media_proxy_always": config.MEDIA_PROXY_ALWAYS,
             "listing_cap": creators.REDDIT_LISTING_CAP,
+            # The UI hides the X platform button entirely when this is false,
+            # rather than offering a control that can only fail.
+            "platforms": [p for p in PLATFORMS
+                          if p != "twitter" or twitter.available()],
             "warnings": config.startup_warnings(),
         })
 
@@ -123,7 +142,7 @@ def create_app(manager=None):
         if len(query) > 64:
             return _error("invalid_query", "That search is too long.")
         platform = request.args.get("platform", "both")
-        if platform not in ("both", "reddit", "redgifs"):
+        if platform != "both" and platform not in PLATFORMS:
             return _error("invalid_platform", "Unknown platform.")
         limit = _clamp(request.args.get("limit"), 25, 1, 50)
         return jsonify(creators.search(query, platform=platform, limit=limit))

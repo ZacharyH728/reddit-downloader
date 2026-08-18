@@ -457,7 +457,109 @@ def describe_gif(gif):
     }
 
 
+def describe_tweet(tweet):
+    """Turn a core.twitter tweet dict into the same shape as describe_submission.
+
+    A tweet carries up to four media files, so a multi-image tweet becomes a
+    `gallery` - which is what makes it inherit the existing `_1`/`_2` filename
+    convention the sibling gallery app already parses. A single-file tweet stays
+    a plain image/video so it doesn't get a pointless `_1` suffix.
+    """
+    tweet_id = str((tweet or {}).get("id") or "")
+    files = (tweet or {}).get("files") or []
+    if not tweet_id or not files:
+        return None
+
+    # X serves animated GIFs as silent MP4s. They are videos as far as
+    # downloading is concerned, and the lightbox notes the missing audio.
+    def is_video(f):
+        return f.get("type") in ("video", "animated_gif")
+
+    first = files[0]
+    base = {
+        "source": "twitter",
+        "id": tweet_id,
+        # Tweets have no title. The text is used for the filename stem when it
+        # says anything; plan_filenames falls back to a dated ID otherwise.
+        "title": tweet.get("text") or "",
+        "created_utc": tweet.get("created_utc"),
+        "nsfw": bool(tweet.get("sensitive")),
+        "permalink": "https://x.com/%s/status/%s" % (
+            tweet.get("handle") or "i/web", tweet_id),
+        "count": len(files),
+        "duration": first.get("duration"),
+        "width": first.get("width"),
+        "height": first.get("height"),
+        "avg_color": None,
+        "has_audio": first.get("type") == "video",
+    }
+
+    if len(files) > 1:
+        base.update({
+            "kind": "gallery",
+            "items": [{
+                "url": f["url"],
+                "ext": f["ext"],
+                # pbs.twimg.com resizes by query parameter, so a grid thumbnail
+                # costs nothing extra to produce.
+                "thumb": _twimg_sized(f["url"], "small"),
+            } for f in files],
+            "preview": _twimg_sized(first["url"], "medium"),
+            "preview_type": "image",
+            "thumb": _twimg_sized(first["url"], "small"),
+        })
+        return base
+
+    if is_video(first):
+        base.update({
+            "kind": "video",
+            "ext": first.get("ext") or "mp4",
+            "url": first["url"],
+            "video_url": first["url"],
+            # video.twimg.com MP4s are progressive and honor Range, so the
+            # lightbox plays them directly - no lazy resolve step like RedGifs.
+            "preview": first["url"],
+            "preview_type": "video",
+            "thumb": None,
+        })
+        return base
+
+    base.update({
+        "kind": "image",
+        "ext": first.get("ext") or "jpg",
+        "url": first["url"],
+        "preview": _twimg_sized(first["url"], "medium"),
+        "preview_type": "image",
+        "thumb": _twimg_sized(first["url"], "small"),
+    })
+    return base
+
+
+def _twimg_sized(url, name):
+    """Ask pbs.twimg.com for a scaled variant of an image URL.
+
+    Their URLs carry the size in a `name=` parameter (`...?format=jpg&name=orig`).
+    Anything that isn't a pbs.twimg.com media URL - a video, notably - is returned
+    untouched, because rewriting a video URL's query breaks it.
+    """
+    if not url or "pbs.twimg.com" not in url or "name=" not in url:
+        return url
+    return re.sub(r"([?&]name=)[^&]*", r"\g<1>" + name, url)
+
+
 # --- filenames --------------------------------------------------------------
+
+def _dated_stem(created, item_id):
+    """`YYYYMMDD_<id>`, or just `<id>` when the timestamp is missing or bogus."""
+    if not created:
+        return item_id
+    try:
+        stamp = datetime.datetime.fromtimestamp(
+            float(created), datetime.timezone.utc).strftime("%Y%m%d")
+    except (ValueError, OSError, OverflowError, TypeError):
+        return item_id
+    return "%s_%s" % (stamp, item_id)
+
 
 def plan_filenames(desc, owned_files, max_len=None):
     """Decide which filenames `desc` will occupy. Does not touch the disk."""
@@ -467,15 +569,29 @@ def plan_filenames(desc, owned_files, max_len=None):
         # RedGifs items have no title. A date prefix sorts chronologically in any
         # file browser, and the alphanumeric ID can never end in `_<digits>`, so
         # this cannot accidentally look like a `_1`/`_2` gallery to the viewer.
-        created = desc.get("created_utc")
-        stem = post_id
-        if created:
-            try:
-                stamp = datetime.datetime.fromtimestamp(
-                    float(created), datetime.timezone.utc).strftime("%Y%m%d")
-                stem = "%s_%s" % (stamp, post_id)
-            except (ValueError, OSError, OverflowError):
-                pass
+        return ["%s.%s" % (_dated_stem(desc.get("created_utc"), post_id), desc["ext"])]
+
+    if desc["source"] == "twitter":
+        # Tweet text is frequently empty, an emoji, or a bare link, so it can't
+        # be the primary name. A date prefix sorts chronologically in any file
+        # browser and the numeric ID keeps two same-text tweets apart; the text,
+        # when there is any, is appended purely so the folder is readable.
+        # The `t` is not decoration. A tweet ID is all digits, so a bare
+        # `<date>_<id>.jpg` ends in `_<digits>` - exactly the shape the sibling
+        # gallery app reads as "page <n> of a gallery". The prefix breaks that.
+        stem = _dated_stem(desc.get("created_utc"), "t" + post_id)
+        text = sanitize_title(desc["title"], max_len=max_len)
+        if text:
+            # Budget the text against what the prefix already spent, so the whole
+            # name still fits the byte limit plan_filenames is given.
+            room = (max_len - len(stem) - 1) if max_len else None
+            if room is None or room > 16:
+                trimmed = sanitize_title(desc["title"], max_len=room) if room else text
+                if trimmed:
+                    stem = "%s_%s" % (stem, trimmed)
+        if desc["kind"] == "gallery":
+            return ["%s_%d.%s" % (stem, i + 1, item["ext"])
+                    for i, item in enumerate(desc["items"])]
         return ["%s.%s" % (stem, desc["ext"])]
 
     base = sanitize_title(desc["title"], max_len=max_len) or post_id
@@ -539,14 +655,18 @@ def download_planned(desc, filenames, dest_dir, session, redgifs=None, should_ca
             target = path_of(name)
             if os.path.exists(target):
                 statuses.append(net.SKIPPED)
-            elif desc["source"] == "redgifs":
-                statuses.append(net.download_file(
-                    desc["video_url"], target, session=session,
-                    should_cancel=should_cancel, expect_ext=desc["ext"]))
-            else:
+            elif desc["source"] == "reddit":
+                # v.redd.it only: video and audio are separate DASH tracks that
+                # have to be muxed. Tested on `source`, not on "not redgifs" -
+                # every other platform serves a single progressive MP4, and
+                # sending one through the muxer fetches a bogus audio URL.
                 statuses.append(net.download_reddit_video(
                     desc["video_url"], target, session,
                     should_cancel=should_cancel, label=name))
+            else:
+                statuses.append(net.download_file(
+                    desc["video_url"], target, session=session,
+                    should_cancel=should_cancel, expect_ext=desc["ext"]))
 
         elif kind == "image":
             name = filenames[0]

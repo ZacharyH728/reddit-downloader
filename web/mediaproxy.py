@@ -12,7 +12,7 @@ import ipaddress
 import re
 import threading
 from http.cookiejar import DefaultCookiePolicy
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import requests
 
@@ -27,6 +27,10 @@ _EXACT_HOSTS = frozenset([
     "external-preview.redd.it",
     "v.redd.it",
     "i.imgur.com",
+    # X media. Listed exactly rather than by suffix: twimg.com also hosts
+    # abs.twimg.com (site JavaScript), which has no business behind this proxy.
+    "pbs.twimg.com",
+    "video.twimg.com",
 ])
 # thumbs1..N.redgifs.com and media.redgifs.com are unbounded in number, so the
 # redgifs domain is matched by suffix. api.redgifs.com is excluded on purpose:
@@ -101,10 +105,17 @@ def check_url(raw):
 
 def _content_type_for(url, upstream_type):
     """Prefer a type derived from the URL over whatever upstream claims."""
-    path = urlsplit(url).path.lower()
+    parts = urlsplit(url)
+    path = parts.path.lower()
     ext = path.rsplit(".", 1)[-1] if "." in path else ""
     if ext in _EXT_TYPES:
         return _EXT_TYPES[ext]
+    # pbs.twimg.com puts the format in the query and leaves the path
+    # extensionless (`/media/<id>?format=jpg&name=orig`), so there is nothing to
+    # derive above and we'd otherwise have to trust the upstream header.
+    fmt = parse_qs(parts.query).get("format")
+    if fmt and fmt[0].lower() in _EXT_TYPES:
+        return _EXT_TYPES[fmt[0].lower()]
     base = (upstream_type or "").split(";")[0].strip().lower()
     if _ALLOWED_TYPE_RE.match(base):
         return base

@@ -367,6 +367,40 @@ def test_creator_directory_is_created_under_the_platform(env, manager, server, t
     assert not (tmp_path / "somebody").exists()
 
 
+def test_twitter_downloads_stream_instead_of_pre_enumerating(env, manager, server):
+    """X reports no total, so the job must interleave enumeration with
+    downloading rather than walking the whole timeline up front - the same
+    treatment RedGifs gets, and for the same reason (throttling)."""
+    env["descs"] = [make_desc("100%d" % i, server + "/good.jpg") for i in range(8)]
+    env["total"] = None
+    job = wait_for(manager, manager.submit("twitter", "someone", "all")["id"])
+    assert job["state"] == jobs.DONE
+    assert job["downloaded"] == 8
+    # Nothing invented a total the platform never supplied.
+    assert job["total"] is None
+
+
+def test_twitter_creator_directory_is_created_under_the_platform(
+        env, manager, server, tmp_path):
+    env["descs"] = [make_desc("1789012345678901234", server + "/good.jpg")]
+    wait_for(manager, manager.submit(
+        "twitter", "SomeOne", "selected", ["1789012345678901234"])["id"])
+    assert (tmp_path / "twitter" / "someone").is_dir()
+
+
+@pytest.mark.parametrize("item_id", [
+    "not-a-tweet-id",     # tweet IDs are numeric only
+    "abc123",             # a Reddit-shaped ID
+    "12",                 # too short
+    "1" * 30,             # too long
+])
+def test_non_tweet_item_ids_are_rejected(manager, item_id):
+    """The ID patterns are per-platform, and this one reaches the filesystem."""
+    from core.validate import ValidationError
+    with pytest.raises(ValidationError):
+        manager.submit("twitter", "someone", "selected", [item_id])
+
+
 def test_creator_name_is_lowercased_on_disk(env, manager, server, tmp_path):
     env["descs"] = [make_desc("t1", server + "/good.jpg")]
     job = wait_for(manager, manager.submit("reddit", "MixedCase", "selected", ["t1"])["id"])

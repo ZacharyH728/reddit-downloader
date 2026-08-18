@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from core import config, creators, jobs
+from core import config, creators, jobs, twitter
 from core.jobs import JobManager
 from tests.test_download import Handler, QuietServer
 from tests.test_jobs import make_desc
@@ -114,7 +114,7 @@ def test_search_requires_two_characters(client):
 
 
 def test_search_rejects_an_unknown_platform(client):
-    response = client.get("/api/search?q=abc&platform=twitter")
+    response = client.get("/api/search?q=abc&platform=facebook")
     assert response.status_code == 400
     assert response.get_json()["error"]["code"] == "invalid_platform"
 
@@ -128,12 +128,79 @@ def test_search_returns_both_sections(client, stubs):
     assert body["redgifs"]["error"]
 
 
+def test_health_lists_only_configured_platforms(client, monkeypatch):
+    """The UI hides a platform button entirely rather than offering one that
+    can only ever fail, so this list has to be honest."""
+    monkeypatch.setattr(twitter.config, "TWITTER_AUTH_TOKEN", None)
+    assert "twitter" not in client.get("/api/health").get_json()["platforms"]
+
+    monkeypatch.setattr(twitter.config, "TWITTER_AUTH_TOKEN", "deadbeef")
+    if twitter.gallery_dl is None:
+        pytest.skip("gallery-dl not installed")
+    body = client.get("/api/health").get_json()
+    assert "twitter" in body["platforms"]
+    assert {"reddit", "redgifs"} <= set(body["platforms"])
+
+
+def test_health_never_leaks_the_twitter_cookie(client, monkeypatch):
+    """TWITTER_AUTH_TOKEN is a live session credential, not a config value."""
+    monkeypatch.setattr(twitter.config, "TWITTER_AUTH_TOKEN", "s3cr3t-session-value")
+    for path in ("/api/health", "/api/library"):
+        assert "s3cr3t-session-value" not in client.get(path).get_data(as_text=True)
+
+
+def test_twitter_auth_failure_is_a_401_not_a_502(client, monkeypatch):
+    """It is fixed by replacing the cookie, not by retrying, and the UI shows a
+    different banner for it."""
+    def boom(*a, **k):
+        raise twitter.TwitterAuthError("401 Unauthorized")
+    monkeypatch.setattr(creators, "list_items", boom)
+    response = client.get("/api/creators/twitter/someone/items")
+    assert response.status_code == 401
+    assert response.get_json()["error"]["code"] == "twitter_auth"
+
+
+def test_twitter_unavailable_is_a_503(client, monkeypatch):
+    def boom(*a, **k):
+        raise twitter.TwitterUnavailable("TWITTER_AUTH_TOKEN is unset")
+    monkeypatch.setattr(creators, "list_items", boom)
+    response = client.get("/api/creators/twitter/someone/items")
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "twitter_unavailable"
+
+
+@pytest.mark.parametrize("handle,ok", [
+    ("jack", True),
+    ("a", True),                    # X allows single-character handles
+    ("abcdefghijklmno", True),      # 15, the maximum
+    ("abcdefghijklmnop", False),    # 16, one over
+    ("has.dot", False),             # X handles are [A-Za-z0-9_] only
+    ("has-dash", False),
+    ("", False),
+])
+def test_twitter_handle_validation(handle, ok):
+    from core.validate import ValidationError, validate_creator
+    if ok:
+        assert validate_creator("twitter", handle) == handle.lower()
+    else:
+        with pytest.raises(ValidationError):
+            validate_creator("twitter", handle)
+
+
+def test_a_leading_at_sign_is_accepted_and_stripped():
+    """"@handle" is how someone writes their own name; the canonical form is bare."""
+    from core.validate import validate_creator
+    assert validate_creator("twitter", "@Jack") == "jack"
+
+
 # --- creators -------------------------------------------------------------
 
 @pytest.mark.parametrize("path", [
     "/api/creators/reddit/..",
     "/api/creators/reddit/a",
-    "/api/creators/twitter/someone",
+    "/api/creators/facebook/someone",
+    # 16 chars: one over X's handle limit.
+    "/api/creators/twitter/abcdefghijklmnop",
     "/api/creators/reddit/with%20space",
     "/api/creators/reddit/%2e%2e",
     "/api/creators/reddit/%252e%252e",
@@ -201,7 +268,7 @@ def test_download_rejects_bad_input(client):
         "platform": "reddit", "creator": "someone", "mode": "selected",
         "ids": []}).status_code == 400
     assert client.post("/api/downloads", json={
-        "platform": "twitter", "creator": "someone", "mode": "all"}).status_code == 400
+        "platform": "facebook", "creator": "someone", "mode": "all"}).status_code == 400
     assert client.post("/api/downloads", json={
         "platform": "reddit", "creator": "../etc", "mode": "all"}).status_code == 400
     assert client.post("/api/downloads", json={

@@ -4,9 +4,9 @@ Two things in one container:
 
 1. **The saved-posts sync** — the original behavior. Every hour it walks your own
    saved Reddit posts and downloads any media into a flat `DOWNLOAD_LOCATION`.
-2. **A web UI** — search for a creator on Reddit or RedGifs, preview their content
-   in a grid, and download all of it or just the items you pick, into
-   `downloads/<platform>/<creator>/`.
+2. **A web UI** — search for a creator on Reddit, RedGifs or X/Twitter, preview
+   their content in a grid, and download all of it or just the items you pick,
+   into `downloads/<platform>/<creator>/`.
 
 ```
 http://localhost:8080
@@ -42,6 +42,39 @@ All configuration is environment variables (a `.env` file is read if present).
 | `REDDIT_USERNAME` / `REDDIT_PASSWORD` | The account must be a developer of the app, and must not have 2FA |
 
 RedGifs needs no credentials — the client fetches an anonymous token itself.
+
+### X / Twitter (optional)
+
+X has no free API read tier — new developers are metered per post read — so this
+uses [gallery-dl](https://github.com/mikf/gallery-dl) against the same GraphQL
+endpoints the website uses, authenticated with your own session cookie.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `TWITTER_AUTH_TOKEN` | *(unset)* | The `auth_token` cookie from a logged-in x.com session. Unset ⇒ X support is off |
+| `TWITTER_RETWEETS` | `false` | Include media from retweets |
+| `TWITTER_MAX_ITEMS` | `3000` | Cap on a "download everything" job |
+| `TWITTER_MIN_INTERVAL` | `1.0` | Minimum seconds between X API calls |
+
+To get the cookie: DevTools → Application/Storage → Cookies → `https://x.com` →
+copy the value of `auth_token`.
+
+**Treat it like a password — it *is* your session.** It expires every few weeks;
+when it does, the UI says the session was rejected rather than failing silently.
+Paste a fresh one and restart.
+
+Two things about X that are different from the other platforms, both structural:
+
+- **Search is exact-handle only.** X's user-search endpoints aren't exposed by
+  gallery-dl, so typing a partial name matches nothing — type the real handle.
+- **There is no item total**, so "download everything" shows an indeterminate
+  progress bar rather than a percentage, and stops at `TWITTER_MAX_ITEMS`. X
+  throttles deep paging hard, so an unbounded walk gets rate-limited instead of
+  finishing.
+
+gallery-dl is used for **metadata only** — it never writes a file. Downloads go
+through the same `core.net` path as everything else, so the manifest, filename
+scheme, cancellation and `.part` verification all behave identically.
 
 ### Storage
 
@@ -84,10 +117,12 @@ perimeter. Don't publish the port or put it behind a public reverse proxy.
 Two things that are *not* access control are still enforced, and shouldn't be
 removed:
 
-- The media proxy only fetches from an allowlist of Reddit and RedGifs hosts, and
-  re-validates every redirect hop. Without it, `/api/proxy` is an open request
-  forwarder that can reach anything the container can — cloud metadata endpoints,
-  other services on the network.
+- The media proxy only fetches from an allowlist of Reddit, RedGifs and X media
+  hosts, and re-validates every redirect hop. Without it, `/api/proxy` is an open
+  request forwarder that can reach anything the container can — cloud metadata
+  endpoints, other services on the network. Note `pbs.twimg.com` and
+  `video.twimg.com` are listed by *exact* host, so the rest of `twimg.com` —
+  notably `abs.twimg.com`, which serves site JavaScript — stays out.
 - Creator names are validated against a strict pattern and the resulting path is
   realpath-checked for containment, so a request can't write outside the download
   tree.
@@ -107,6 +142,11 @@ limit on ext4 and fails mid-job.
 is globally unique, and can never end in `_<digits>`, so it can't be mistaken for
 a gallery by a viewer that groups on that pattern.
 
+**X creators** become `<YYYYMMDD>_t<tweetid>[_<text>].<ext>`, and a multi-image
+tweet becomes a gallery: `..._1.jpg`, `..._2.jpg`, … The `t` before the tweet ID
+is load-bearing — a tweet ID is all digits, so a bare `<date>_<id>.jpg` would end
+in `_<digits>` and read as page *n* of a gallery.
+
 Every directory carries its own `.download_manifest.json` mapping post ID → the
 files it owns, so a creator folder is self-contained and portable. Delete it to
 force a full re-verify of that folder.
@@ -121,6 +161,7 @@ core/
   net.py                sessions + download primitives
   manifest.py           filename derivation + per-directory manifest
   redgifs.py            RedGifs API client
+  twitter.py            X/Twitter via gallery-dl (metadata only)
   reddit_api.py         Reddit auth, search, listing, per-post dispatch
   creators.py           platform-agnostic search/listing/have-state
   jobs.py               background download jobs
@@ -139,7 +180,7 @@ Errors are always `{"error": {"code": ..., "message": ..., "retry_after": ...}}`
 
 ```
 GET  /api/health
-GET  /api/search?q=&platform=both|reddit|redgifs
+GET  /api/search?q=&platform=both|reddit|redgifs|twitter
 GET  /api/library
 GET  /api/creators/<platform>/<name>
 GET  /api/creators/<platform>/<name>/items?cursor=&limit=&sort=&kind=&only=
@@ -170,6 +211,10 @@ allowlist, truncated/failed downloads, and the job state machine.
 
 ## Things worth knowing
 
+- **X cookies expire far faster than the other platforms' credentials** — weeks,
+  not months. When it happens every X request fails at once, and the UI shows a
+  distinct "session rejected" banner rather than a generic error, because
+  retrying will never fix it.
 - **Reddit caps user listings at roughly 1000 items.** "Download everything" for a
   prolific creator means "everything Reddit will list". The UI says so.
 - **`preview.redd.it` URLs are HMAC-signed.** They are used verbatim; altering any

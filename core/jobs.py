@@ -304,9 +304,11 @@ class JobManager:
                                  max_len, cancelled)
         else:
             self._set(job, phase="enumerating")
-            if job.platform == "redgifs":
-                # total/pages come back with page 1, so the progress bar is
-                # honest immediately and enumeration interleaves with downloads.
+            if job.platform in ("redgifs", "twitter"):
+                # Both stream: RedGifs because pre-walking a 5000-gif creator at
+                # 1 req/s is minutes of dead time, X because it throttles deep
+                # paging and reports no total at all (so the bar runs
+                # indeterminate - see total_estimate).
                 self._set(job, total=creators.total_estimate(job.platform, job.creator))
                 batch = []
                 for desc in creators.iter_all_items(job.platform, job.creator,

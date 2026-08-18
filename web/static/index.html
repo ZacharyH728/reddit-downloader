@@ -19,6 +19,9 @@
       <button type="button" data-platform="both" class="on">Both</button>
       <button type="button" data-platform="reddit">Reddit</button>
       <button type="button" data-platform="redgifs">RedGifs</button>
+      <!-- Hidden at boot unless /api/health reports X as configured: without an
+           auth token it is a button that can only ever fail. -->
+      <button type="button" data-platform="twitter" data-optional="1" hidden>X</button>
     </div>
     <button type="submit" class="primary">Search</button>
   </form>

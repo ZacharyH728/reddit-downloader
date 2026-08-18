@@ -41,6 +41,21 @@ const tileCache = new Map();
 let currentVideo = null;
 let videoObserver = null;
 
+/* Search sections render in this order. Trimmed at boot to whatever
+ * /api/health says is actually configured. */
+let PLATFORMS = ['reddit', 'redgifs', 'twitter'];
+const PLATFORM_LABELS = { reddit: 'Reddit', redgifs: 'RedGifs', twitter: 'X' };
+/* How a creator's own handle is written on each platform. */
+const HANDLE_PREFIX = { reddit: 'u/', twitter: '@', redgifs: '' };
+
+/* Highlight the active platform button. Called at bind time and again after
+ * boot, once /api/health has said which platforms actually exist. */
+function syncPlatformToggle() {
+  for (const b of $('#platform-toggle').children) {
+    b.classList.toggle('on', b.dataset.platform === state.platform);
+  }
+}
+
 /* ---------------------------------------------------------------- api ---- */
 
 class ApiError extends Error {
@@ -213,7 +228,7 @@ function resultRow(item) {
   }, avatar,
      el('div', { class: 'who' },
         el('b', { text: item.display || item.name }),
-        el('span', { text: item.platform === 'reddit' ? `u/${item.name}` : item.name })),
+        el('span', { text: (HANDLE_PREFIX[item.platform] || '') + item.name })),
      tags);
 }
 
@@ -229,13 +244,17 @@ function renderSearch() {
 
   if (state.results) {
     let any = false;
-    for (const platform of ['reddit', 'redgifs']) {
+    for (const platform of PLATFORMS) {
       const section = state.results[platform];
       if (!section) continue;
       const results = section.results || [];
       any = any || results.length > 0;
       view.append(el('div', { class: 'section-title' },
-        el('span', { text: platform }),
+        el('span', { text: PLATFORM_LABELS[platform] || platform }),
+        // X has no fuzzy index, so say so once here rather than letting an
+        // empty section read as "this creator doesn't exist".
+        section.exact_only && !results.length && !section.error
+          ? el('span', { class: 'hint', text: 'exact handle only' }) : null,
         section.error ? el('span', { class: 'err', text: section.error }) : null));
       if (results.length) {
         view.append(el('div', { class: 'results' }, ...results.map(resultRow)));
@@ -246,7 +265,8 @@ function renderSearch() {
     if (!any) {
       view.append(el('div', { class: 'empty' },
         el('h2', { text: 'Nothing found' }),
-        el('p', { text: 'Try the exact handle - both sites index names loosely.' })));
+        el('p', { text: 'Try the exact handle - Reddit and RedGifs index names '
+                        + 'loosely, and X only matches exactly.' })));
     }
     return;
   }
@@ -406,6 +426,9 @@ function updateLoadStatus() {
     if (state.creator.platform === 'reddit' && state.items.length >= 900) {
       notes.push('Reddit only exposes roughly the most recent 1000 posts.');
     }
+    if (state.creator.platform === 'twitter') {
+      notes.push('X throttles deep paging; scroll again later if this stopped short.');
+    }
     foot.append(el('div', { class: 'spinner', text: notes.join(' — ') }));
   }
 }
@@ -444,6 +467,11 @@ async function loadMore() {
   } catch (err) {
     if (err.code === 'rate_limited') {
       banner(`Rate limited${err.retryAfter ? ` - retry in ${err.retryAfter}s` : ''}.`, 'error');
+    } else if (err.code === 'twitter_auth') {
+      // Distinct from a transient error: nothing on X will work again until the
+      // cookie is replaced, so say that rather than "try again".
+      banner('X rejected the saved session. Refresh TWITTER_AUTH_TOKEN and '
+             + 'restart the server.', 'error');
     } else {
       banner(err.message || 'Could not load more items.', 'error');
     }
@@ -591,11 +619,18 @@ async function downloadSelected() {
 async function downloadAll() {
   if (!state.creator) return;
   const info = state.creator;
-  const known = info.platform === 'redgifs' && state.itemTotal
-    ? `${state.itemTotal} items`
-    : (info.platform === 'reddit'
-        ? 'up to about 1000 items (Reddit’s listing cap)'
-        : 'everything available');
+  let known = 'everything available';
+  if (info.platform === 'redgifs' && state.itemTotal) {
+    known = `${state.itemTotal} items`;
+  } else if (info.platform === 'reddit') {
+    known = 'up to about 1000 items (Reddit’s listing cap)';
+  } else if (info.platform === 'twitter') {
+    // X gives no total, so the job bar runs indeterminate and the only honest
+    // number to quote is the cap the server will stop at.
+    known = info.listing_cap
+      ? `up to ${info.listing_cap} tweets (X paging cap)`
+      : 'every tweet X will page through';
+  }
   if (!confirm(`Download ${known} from ${info.creator} into ${info.dest}?`)) return;
   try {
     const data = await api('/api/downloads', {
@@ -820,8 +855,14 @@ async function renderLightbox() {
     }
     clear(stage);
   } else if (item.kind === 'video' && item.preview_type === 'video') {
-    // v.redd.it fallback_url is the video-only DASH track.
-    note = 'preview is silent - the download includes audio';
+    if (item.source === 'twitter') {
+      // X serves animated GIFs as silent MP4s. Nothing is missing from the
+      // download here, unlike the v.redd.it case below.
+      if (item.has_audio === false) note = 'no audio';
+    } else {
+      // v.redd.it fallback_url is the video-only DASH track.
+      note = 'preview is silent - the download includes audio';
+    }
   }
 
   if (!source) {
@@ -882,14 +923,10 @@ function bindChrome() {
     if (!button) return;
     state.platform = button.dataset.platform;
     localStorage.setItem('rd_platform', state.platform);
-    for (const b of $('#platform-toggle').children) {
-      b.classList.toggle('on', b === button);
-    }
+    syncPlatformToggle();
     if (state.query) doSearch(state.query);
   });
-  for (const b of $('#platform-toggle').children) {
-    b.classList.toggle('on', b.dataset.platform === state.platform);
-  }
+  syncPlatformToggle();
 
   $('#jobs-button').addEventListener('click', () => {
     state.drawerOpen = !state.drawerOpen;
@@ -962,6 +999,22 @@ async function boot() {
   } catch (err) {
     banner('Could not reach the server.', 'error');
   }
+
+  if (state.health && state.health.platforms) {
+    PLATFORMS = state.health.platforms;
+  }
+  // Hide the toggle for anything the server didn't report as configured, and
+  // fall back to "Both" if the hidden one was the remembered choice.
+  for (const button of document.querySelectorAll('#platform-toggle button')) {
+    const supported = !button.dataset.optional
+      || PLATFORMS.includes(button.dataset.platform);
+    button.hidden = !supported;
+    if (!supported && state.platform === button.dataset.platform) {
+      state.platform = 'both';
+      localStorage.setItem('rd_platform', 'both');
+    }
+  }
+  syncPlatformToggle();
 
   const warnings = (state.health && state.health.warnings) || [];
   const notable = warnings.find((w) => w.code === 'reddit_credentials_missing');
