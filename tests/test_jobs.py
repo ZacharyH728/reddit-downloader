@@ -68,11 +68,15 @@ def env(tmp_path, monkeypatch, server):
         missing = [i for i in item_ids if i not in by_id]
         return found, missing
 
-    def fake_iter(platform, name, page_size=100, should_stop=None):
+    def fake_iter(platform, name, page_size=100, should_stop=None, kind="all"):
         should_stop = should_stop or (lambda: False)
         for desc in state["descs"]:
             if should_stop():
                 return
+            # Mirrors the real iter_all_items, which filters by kind while
+            # paging — so a test can assert what a filtered job enumerated.
+            if not creators.kind_matches(kind, desc["kind"]):
+                continue
             state["enumerated"] += 1
             yield desc
 
@@ -166,6 +170,109 @@ def test_same_title_posts_get_distinct_filenames(env, manager, server, tmp_path)
     names = sorted(p.name for p in (tmp_path / "reddit" / "someone").glob("*.jpg"))
     assert names == ["Same Title.jpg", "Same Title_e2.jpg", "Same Title_e3.jpg"]
     assert len(set(names)) == 3
+
+
+# --- filters on a "download everything" job ---------------------------------
+#
+# The button takes what the grid is showing, so a job carries the same kind/only
+# filters the listing was using. Getting this wrong is quiet and expensive: the
+# user filters to images and the button fetches a creator's entire video back
+# catalogue.
+
+def make_video_desc(item_id, url, title=None):
+    """A kind="video" desc that still downloads via the plain file path.
+
+    `source` is deliberately not "reddit", so this skips the v.redd.it DASH
+    muxer, and the body is the same jpg fixture as everything else: these tests
+    are about which items get *selected*, and a real mp4 fixture would only make
+    a filter regression fail with a confusing download error instead of a clean
+    count mismatch.
+    """
+    desc = make_desc(item_id, url, title=title)
+    desc.update({"source": "twitter", "kind": "video", "video_url": url})
+    return desc
+
+
+def test_download_all_honors_the_kind_filter(env, manager, server, tmp_path):
+    env["descs"] = [make_desc("y1", server + "/good.jpg"),
+                    make_video_desc("y2", server + "/good.jpg"),
+                    make_desc("y3", server + "/good.jpg"),
+                    make_video_desc("y4", server + "/good.jpg")]
+    job = wait_for(manager, manager.submit(
+        "reddit", "someone", "all", kind="image")["id"])
+
+    assert job["state"] == jobs.DONE
+    assert job["kind"] == "image"
+    # total counts the filtered set, so the progress bar measures real work.
+    assert (job["downloaded"], job["total"]) == (2, 2)
+
+    manifest = Manifest(str(tmp_path / "reddit" / "someone"))
+    assert manifest.has_post("y1") and manifest.has_post("y3")
+    # Filtered-out items must be left completely alone - not downloaded, and not
+    # recorded either, or a later unfiltered run would skip them as "have".
+    assert not manifest.has_post("y2")
+    assert not manifest.has_post("y4")
+
+
+def test_download_all_kind_video_leaves_images(env, manager, server):
+    env["descs"] = [make_desc("z1", server + "/good.jpg"),
+                    make_video_desc("z2", server + "/good.jpg")]
+    job = wait_for(manager, manager.submit(
+        "reddit", "someone", "all", kind="video")["id"])
+    assert (job["downloaded"], job["total"]) == (1, 1)
+
+
+def test_video_filter_covers_the_redgifs_kind():
+    """The grid's "Videos" toggle shows both kinds, so a job must take both."""
+    assert creators.kind_matches("video", "video")
+    assert creators.kind_matches("video", "redgifs")
+    assert not creators.kind_matches("image", "redgifs")
+    assert creators.kind_matches("all", "gallery")
+    # An unrecognised filter must not silently select nothing.
+    assert creators.kind_matches("bogus", "image")
+
+
+def test_download_all_only_missing_ignores_what_we_have(env, manager, server):
+    env["descs"] = [make_desc("w%d" % i, server + "/good.jpg") for i in range(4)]
+    assert wait_for(manager, manager.submit(
+        "reddit", "someone", "all")["id"])["downloaded"] == 4
+
+    env["descs"].append(make_desc("w9", server + "/good.jpg"))
+    job = wait_for(manager, manager.submit(
+        "reddit", "someone", "all", only="missing")["id"])
+    assert job["only"] == "missing"
+    # The four we already have are filtered out before `total`, rather than
+    # counted as four instant skips.
+    assert (job["downloaded"], job["skipped"], job["total"]) == (1, 0, 1)
+
+    # Unfiltered, the same listing reports them as skipped instead - same files
+    # on disk either way, different accounting.
+    job = wait_for(manager, manager.submit("reddit", "someone", "all")["id"])
+    assert (job["downloaded"], job["skipped"], job["total"]) == (0, 5, 5)
+
+
+def test_download_rejects_unknown_filters(env, manager):
+    with pytest.raises(JobError) as exc:
+        manager.submit("reddit", "someone", "all", kind="sideways")
+    assert exc.value.code == "invalid_kind"
+
+    with pytest.raises(JobError) as exc:
+        manager.submit("reddit", "someone", "all", only="sideways")
+    assert exc.value.code == "invalid_only"
+
+    # "have" is a real /items filter, but a download job that only takes what is
+    # already on disk provably transfers nothing, so it is refused rather than
+    # accepted and silently turned into a no-op.
+    with pytest.raises(JobError) as exc:
+        manager.submit("reddit", "someone", "all", only="have")
+    assert exc.value.code == "invalid_only"
+
+
+def test_unfiltered_job_reports_all_as_its_scope(env, manager, server):
+    """The drawer reads these to label a job, so the default must stay "all"."""
+    env["descs"] = [make_desc("v1", server + "/good.jpg")]
+    job = wait_for(manager, manager.submit("reddit", "someone", "all")["id"])
+    assert (job["kind"], job["only"]) == ("all", "all")
 
 
 # --- failure handling -------------------------------------------------------

@@ -273,6 +273,34 @@ def test_download_rejects_bad_input(client):
         "platform": "reddit", "creator": "../etc", "mode": "all"}).status_code == 400
     assert client.post("/api/downloads", json={
         "platform": "reddit", "creator": "someone", "mode": "sideways"}).status_code == 400
+    assert client.post("/api/downloads", json={
+        "platform": "reddit", "creator": "someone", "mode": "all",
+        "kind": "sideways"}).status_code == 400
+    assert client.post("/api/downloads", json={
+        "platform": "reddit", "creator": "someone", "mode": "all",
+        "only": "sideways"}).status_code == 400
+
+
+def test_download_forwards_the_grid_filters(client, manager, stubs, server):
+    """The UI sends the filters it is displaying; they must reach the job."""
+    stubs["descs"] = [make_desc("ff%02d" % i, server + "/slow.jpg") for i in range(20)]
+    created = client.post("/api/downloads", json={
+        "platform": "reddit", "creator": "someone", "mode": "all",
+        "kind": "image", "only": "missing"}).get_json()["job"]
+    try:
+        assert (created["kind"], created["only"]) == ("image", "missing")
+    finally:
+        client.post("/api/jobs/%s/cancel" % created["id"])
+
+
+def test_download_defaults_to_no_filter(client, manager, stubs, server):
+    stubs["descs"] = [make_desc("gg%02d" % i, server + "/slow.jpg") for i in range(20)]
+    created = client.post("/api/downloads", json={
+        "platform": "reddit", "creator": "someone", "mode": "all"}).get_json()["job"]
+    try:
+        assert (created["kind"], created["only"]) == ("all", "all")
+    finally:
+        client.post("/api/jobs/%s/cancel" % created["id"])
 
 
 def test_download_ignores_a_client_supplied_url(client, manager, tmp_path):

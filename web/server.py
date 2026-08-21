@@ -199,6 +199,10 @@ def create_app(manager=None):
             payload.get("creator"),
             payload.get("mode", "selected"),
             payload.get("ids"),
+            # Same filters as /items, so "download everything" from a filtered
+            # grid takes what the grid showed rather than the whole catalogue.
+            kind=payload.get("kind", "all"),
+            only=payload.get("only", "all"),
         )
         return jsonify({"job": job}), 202
 

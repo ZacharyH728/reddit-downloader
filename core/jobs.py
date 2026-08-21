@@ -48,12 +48,16 @@ class JobError(Exception):
 
 
 class Job:
-    def __init__(self, platform, creator, mode, item_ids=None):
+    def __init__(self, platform, creator, mode, item_ids=None, kind="all", only="all"):
         self.id = uuid.uuid4().hex[:12]
         self.platform = platform
         self.creator = creator
         self.mode = mode
         self.item_ids = list(item_ids or [])
+        # Filters, mirroring the grid's own. Only meaningful for mode="all" —
+        # a "selected" job already carries an explicit id list.
+        self.kind = kind
+        self.only = only
         self.state = QUEUED
         self.phase = "queued"
         self.total = len(self.item_ids) if mode == "selected" else None
@@ -78,6 +82,8 @@ class Job:
             "platform": self.platform,
             "creator": self.creator,
             "mode": self.mode,
+            "kind": self.kind,
+            "only": self.only,
             "state": self.state,
             "phase": self.phase,
             "total": self.total,
@@ -126,11 +132,22 @@ class JobManager:
 
     # --- submission -----------------------------------------------------
 
-    def submit(self, platform, creator, mode, item_ids=None):
+    def submit(self, platform, creator, mode, item_ids=None, kind="all", only="all"):
         platform = validate_platform(platform)
         creator = validate_creator(platform, creator)
         if mode not in ("all", "selected"):
             raise JobError("invalid_mode", "mode must be 'all' or 'selected'.")
+
+        kind = kind or "all"
+        if kind != "all" and kind not in creators.KIND_FILTERS:
+            raise JobError("invalid_kind", "kind must be 'all' or one of %s."
+                           % ", ".join(sorted(creators.KIND_FILTERS)))
+        only = only or "all"
+        # list_items also accepts "have", which is meaningless for a download —
+        # every item would be skipped as already present. Rejecting it beats
+        # accepting a request that provably downloads nothing.
+        if only not in ("all", "missing"):
+            raise JobError("invalid_only", "only must be 'all' or 'missing'.")
 
         ids = []
         if mode == "selected":
@@ -160,12 +177,13 @@ class JobManager:
                 "Only %d MB free; need at least %d MB." % (free, config.MIN_FREE_DISK_MB),
                 507)
 
-        job = Job(platform, creator, mode, ids)
+        job = Job(platform, creator, mode, ids, kind=kind, only=only)
         with self._lock:
             self._jobs[job.id] = job
             self._trim()
         self._queue.put(job.id)
-        logger.info("Queued %s job for %s/%s (%s)", mode, platform, creator, job.id)
+        logger.info("Queued %s job for %s/%s (kind=%s, only=%s) (%s)",
+                    mode, platform, creator, kind, only, job.id)
         return job.as_dict()
 
     def retry_failed(self, job_id):
@@ -304,15 +322,19 @@ class JobManager:
                                  max_len, cancelled)
         else:
             self._set(job, phase="enumerating")
+            # A job started from a filtered grid takes only what the grid showed.
+            # `kind` is decided from the listing alone, so creators applies it
+            # while paging; `only` needs the manifest, which lives here.
+            source = self._apply_only(job, manifest, creators.iter_all_items(
+                job.platform, job.creator, should_stop=cancelled, kind=job.kind))
             if job.platform in ("redgifs", "twitter"):
                 # Both stream: RedGifs because pre-walking a 5000-gif creator at
                 # 1 req/s is minutes of dead time, X because it throttles deep
                 # paging and reports no total at all (so the bar runs
                 # indeterminate - see total_estimate).
-                self._set(job, total=creators.total_estimate(job.platform, job.creator))
+                self._set(job, total=self._streaming_total(job))
                 batch = []
-                for desc in creators.iter_all_items(job.platform, job.creator,
-                                                    should_stop=cancelled):
+                for desc in source:
                     batch.append(desc)
                     if len(batch) >= self.concurrency * 4:
                         self._set(job, phase="downloading")
@@ -328,8 +350,7 @@ class JobManager:
             else:
                 # Reddit's listing is cheap and capped, so walk it all up front.
                 descs = []
-                for desc in creators.iter_all_items(job.platform, job.creator,
-                                                    should_stop=cancelled):
+                for desc in source:
                     descs.append(desc)
                     self._set(job, total=len(descs))
                 self._set(job, phase="downloading", total=len(descs))
@@ -337,6 +358,37 @@ class JobManager:
                                      max_len, cancelled)
 
         manifest.flush(force=True)
+
+    @staticmethod
+    def _apply_only(job, manifest, descs):
+        """Drop already-downloaded items when the job was started with the
+        "only missing" filter on.
+
+        _download_batch would skip these anyway, so this changes no files — but
+        it keeps them out of `total`, so the progress bar measures the work the
+        user actually asked for instead of counting a few thousand instant skips.
+        """
+        if job.only != "missing":
+            return descs
+
+        def generate():
+            for desc in descs:
+                if not manifest.has_post(desc["id"]):
+                    yield desc
+        return generate()
+
+    @staticmethod
+    def _streaming_total(job):
+        """Up-front total for the platforms that download while enumerating.
+
+        total_estimate counts a creator's whole catalogue, so it is only right
+        when the job is taking all of it. Under a filter it would overshoot and
+        pin the bar short of 100% forever; an indeterminate bar is the honest
+        answer, the same call twitter's estimate already makes.
+        """
+        if job.kind != "all" or job.only != "all":
+            return None
+        return creators.total_estimate(job.platform, job.creator)
 
     def _download_batch(self, job, descs, manifest, directory, session, redgifs,
                         max_len, cancelled):

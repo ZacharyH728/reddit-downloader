@@ -217,6 +217,13 @@ allowlist, truncated/failed downloads, and the job state machine.
   retrying will never fix it.
 - **Reddit caps user listings at roughly 1000 items.** "Download everything" for a
   prolific creator means "everything Reddit will list". The UI says so.
+- **"Download everything" takes what the grid is filtered to**, not the whole
+  catalogue: the type toggle (videos/images/galleries) and "only missing" are
+  sent with the job, and the button relabels itself ("Download all images") so
+  the two can't be confused. The listing is still *paged* in full — the filter
+  decides what gets downloaded from it, so the caps above still apply. Under a
+  filter the progress bar for RedGifs/X runs indeterminate, because the
+  platform-reported total counts the unfiltered catalogue.
 - **`preview.redd.it` URLs are HMAC-signed.** They are used verbatim; altering any
   query parameter turns them into 403s. If one fails to load, the frontend retries
   it once through `/api/proxy`.

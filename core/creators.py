@@ -203,6 +203,24 @@ def get_creator_profile(platform, name, quiet=False):
 
 # --- listing --------------------------------------------------------------
 
+# Which item kinds each UI type filter accepts. Anything not listed here
+# (including "all") means "no filtering at all".
+#
+# The grid and a "download everything" job must agree on what a filter selects,
+# or the button downloads a different set than the one on screen — so both go
+# through kind_matches instead of each rolling its own mapping.
+KIND_FILTERS = {
+    "video": frozenset(("video", "redgifs")),
+    "image": frozenset(("image",)),
+    "gallery": frozenset(("gallery",)),
+}
+
+
+def kind_matches(kind, item_kind):
+    wanted = KIND_FILTERS.get(kind or "all")
+    return wanted is None or item_kind in wanted
+
+
 def _annotate(desc, manifest, saved_ids, max_len):
     """Attach local state to a described item, without downloading anything."""
     filenames = reddit_api.plan_filenames(desc, manifest.owned, max_len=max_len)
@@ -298,11 +316,7 @@ def list_items(platform, name, cursor=None, limit=30, sort="new", kind="all", on
 
     items = [_annotate(d, manifest, saved_ids, max_len) for d in descs]
 
-    if kind and kind != "all":
-        wanted = {"video": {"video", "redgifs"}, "image": {"image"},
-                  "gallery": {"gallery"}}.get(kind)
-        if wanted:
-            items = [i for i in items if i["kind"] in wanted]
+    items = [i for i in items if kind_matches(kind, i["kind"])]
     if only == "missing":
         items = [i for i in items if not i["have"]]
     elif only == "have":
@@ -433,14 +447,27 @@ def resolve_selected(platform, name, item_ids):
     return descs, missing
 
 
-def iter_all_items(platform, name, page_size=100, should_stop=None):
+def iter_all_items(platform, name, page_size=100, should_stop=None, kind="all"):
     """Yield every downloadable item for a creator, page by page.
 
     Reddit is enumerated eagerly by the caller (it's cheap and unthrottled, so a
     job can report an honest total up front); RedGifs is interleaved with
     downloading, because pre-walking a 5000-gif creator at 1 request/second is
     minutes of dead time before anything happens.
+
+    `kind` applies the same type filter the grid uses, so a "download everything"
+    job started from a filtered view takes only what was on screen. Filtering
+    happens here rather than in each platform branch below so a new platform
+    can't quietly skip it. Note it does not reduce the *paging* — the listing is
+    walked in full either way (and Reddit's cap counts unfiltered posts, which is
+    correct: the cap is a property of the listing, not of the selection).
     """
+    for desc in _iter_all_descs(platform, name, page_size, should_stop):
+        if kind_matches(kind, desc["kind"]):
+            yield desc
+
+
+def _iter_all_descs(platform, name, page_size, should_stop):
     should_stop = should_stop or (lambda: False)
     platform = validate_platform(platform)
     name = validate_creator(platform, name)

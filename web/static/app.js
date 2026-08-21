@@ -48,6 +48,20 @@ const PLATFORM_LABELS = { reddit: 'Reddit', redgifs: 'RedGifs', twitter: 'X' };
 /* How a creator's own handle is written on each platform. */
 const HANDLE_PREFIX = { reddit: 'u/', twitter: '@', redgifs: '' };
 
+/* Type-filter names. `KIND_FILTERS` in core/creators.py decides what each one
+ * actually matches; these are only the words for it. */
+const KIND_PLURALS = { video: 'videos', image: 'images', gallery: 'galleries' };
+
+/* "Download everything" respects the filters on screen, so the button has to say
+ * so — otherwise a grid filtered to images looks like it will fetch the lot. */
+function downloadAllLabel() {
+  if (state.kind === 'all') {
+    return state.onlyMissing ? 'Download all missing' : 'Download everything';
+  }
+  const noun = KIND_PLURALS[state.kind] || state.kind;
+  return state.onlyMissing ? `Download missing ${noun}` : `Download all ${noun}`;
+}
+
 /* Highlight the active platform button. Called at bind time and again after
  * boot, once /api/health has said which platforms actually exist. */
 function syncPlatformToggle() {
@@ -357,7 +371,7 @@ function renderCreator() {
     el('div', { class: 'creator-actions' },
       profile.url ? el('a', { href: profile.url, target: '_blank', rel: 'noreferrer noopener',
                               class: 'chip', text: 'Open profile ↗' }) : null,
-      el('button', { type: 'button', class: 'primary', text: 'Download everything',
+      el('button', { type: 'button', class: 'primary', text: downloadAllLabel(),
                      onclick: downloadAll }))));
 
   view.append(el('div', { class: 'toolbar' },
@@ -619,25 +633,46 @@ async function downloadSelected() {
 async function downloadAll() {
   if (!state.creator) return;
   const info = state.creator;
-  let known = 'everything available';
+
+  // These describe how much of the creator's history gets *scanned*. The
+  // filters below then decide what of it is downloaded, so the two are quoted
+  // separately rather than folded into one (wrong) number.
+  let scanned = 'everything available';
   if (info.platform === 'redgifs' && state.itemTotal) {
-    known = `${state.itemTotal} items`;
+    scanned = `${state.itemTotal} items`;
   } else if (info.platform === 'reddit') {
-    known = 'up to about 1000 items (Reddit’s listing cap)';
+    scanned = 'up to about 1000 items (Reddit’s listing cap)';
   } else if (info.platform === 'twitter') {
     // X gives no total, so the job bar runs indeterminate and the only honest
     // number to quote is the cap the server will stop at.
-    known = info.listing_cap
+    scanned = info.listing_cap
       ? `up to ${info.listing_cap} tweets (X paging cap)`
       : 'every tweet X will page through';
   }
-  if (!confirm(`Download ${known} from ${info.creator} into ${info.dest}?`)) return;
+
+  const filtered = state.kind !== 'all' || state.onlyMissing;
+  const nouns = state.kind !== 'all' ? (KIND_PLURALS[state.kind] || state.kind) : 'items';
+  const what = state.onlyMissing ? `${nouns} you don’t already have` : nouns;
+
+  const prompt = filtered
+    ? `Scan ${scanned} from ${info.creator} and download only the ${what} `
+      + `into ${info.dest}?`
+    : `Download ${scanned} from ${info.creator} into ${info.dest}?`;
+  if (!confirm(prompt)) return;
+
   try {
     const data = await api('/api/downloads', {
       method: 'POST',
-      body: JSON.stringify({ platform: info.platform, creator: info.creator, mode: 'all' }),
+      body: JSON.stringify({
+        platform: info.platform,
+        creator: info.creator,
+        mode: 'all',
+        kind: state.kind,
+        only: state.onlyMissing ? 'missing' : 'all',
+      }),
     });
-    toast('Started downloading everything…', 'ok');
+    toast(filtered ? `Started downloading ${what}…`
+                   : 'Started downloading everything…', 'ok');
     trackJob(data.job);
   } catch (err) {
     toast(err.message || 'Could not start the download.', 'err');
@@ -706,6 +741,17 @@ async function refreshHaveState() {
   refreshTileFlags();
 }
 
+/* What a job covers, in the drawer. An "all" job carries the filters that were
+ * on screen when it started, so "everything" alone would misreport it. `kind`
+ * is guarded because a job from a pre-filter server has no such field. */
+function jobScope(job) {
+  if (job.mode !== 'all') return `${job.total || 0} selected`;
+  const parts = [];
+  if (job.kind && job.kind !== 'all') parts.push(KIND_PLURALS[job.kind] || job.kind);
+  if (job.only === 'missing') parts.push('missing only');
+  return parts.length ? parts.join(' · ') : 'everything';
+}
+
 function jobRow(job) {
   const total = job.total || 0;
   const pct = total ? Math.min(100, Math.round((job.completed / total) * 100)) : 0;
@@ -715,7 +761,7 @@ function jobRow(job) {
     el('div', { class: 'row' },
       el('div', { class: 'grow' },
         el('div', { class: 'name', text: `${job.platform}/${job.creator}` }),
-        el('div', { class: 'meta', text: job.mode === 'all' ? 'everything' : `${job.total || 0} selected` })),
+        el('div', { class: 'meta', text: jobScope(job) })),
       el('span', { class: `state ${job.state}`, text: job.state.replace(/_/g, ' ') })),
     el('div', { class: `bar ${indeterminate ? 'indeterminate' : ''}` },
       el('div', { style: `width:${pct}%` })),
